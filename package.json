@@ -1,0 +1,43 @@
+{
+  "name": "@riffcc/lens-node",
+  "version": "1.0.0",
+  "description": "CLI app to run your Lens node.",
+  "main": "dist/bin.js",
+  "module": "dist/bin.mjs",
+  "types": "dist/types/bin.d.ts",
+  "bin": {
+    "lens-node": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/bin.ts",
+    "build": "vite build && chmod +x dist/bin.js",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/bin.js"
+  },
+  "keywords": [
+    "rifcc",
+    "lens",
+    "peerbit"
+  ],
+  "author": "benya7",
+  "license": "ISC",
+  "packageManager": "pnpm@10.6.3",
+  "dependencies": {
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "@types/yargs": "^17.0.33",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
