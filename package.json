@@ -15,7 +15,8 @@
     "dev": "tsx watch src/bin.ts",
     "build": "rimraf dist && tsc && chmod +x dist/bin.js",
     "prepublishOnly": "npm run build",
-    "start": "node dist/bin.js"
+    "start": "node dist/bin.js",
+    "release": "pnpm build && pnpm publish"
   },
   "keywords": [
     "rifcc",
@@ -24,6 +25,9 @@
   ],
   "author": "benya7",
   "license": "ISC",
+    "publishConfig": {
+    "access": "public"
+  },
   "packageManager": "pnpm@10.6.3",
   "dependencies": {
     "@inquirer/confirm": "^5.1.10",
