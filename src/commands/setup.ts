@@ -5,10 +5,20 @@ import confirm from "@inquirer/confirm";
 import { Peerbit } from 'peerbit';
 import { Site } from '@riffcc/lens-sdk';
 import { GlobalOptions } from '../types.js';
+import yargs from 'yargs';
 
 const setupCommand: CommandModule<{}, GlobalOptions> = {
   command: 'setup',
   describe: 'Setup the lens node and generate a new ID.',
+  builder: (yargs) => 
+    yargs
+      .option('dir', {
+        alias: 'd',
+        type: 'string',
+        description: 'Directory to storing node data',
+        default: getDefaultDir(),
+      })
+    ,
   handler: async (argv) => {
     const directory = argv.dir;
 

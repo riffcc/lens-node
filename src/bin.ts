@@ -8,12 +8,6 @@ import { getDefaultDir } from './utils.js';
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
-  .option('dir', {
-    alias: 'd',
-    type: 'string',
-    description: 'Directory to storing node data',
-    default: getDefaultDir(),
-  })
   .command(setupCommand)
   .command(runCommand)
   .demandCommand(1, 'A command must be specified.')

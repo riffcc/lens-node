@@ -1,7 +1,7 @@
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types';
-import { readConfig } from '../utils.js';
+import { getDefaultDir, readConfig } from '../utils.js';
 import { Site } from '@riffcc/lens-sdk';
 
 type RunCommandArgs = {
@@ -11,6 +11,25 @@ type RunCommandArgs = {
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
   command: 'run',
   describe: 'Starts node daemon.',
+  builder: (yargs) =>
+    yargs
+      .option('relay', {
+        type: 'boolean',
+        description: 'Enable relay mode for the node',
+        default: false,
+      })
+      .option('domains', {
+        type: 'array',
+        description: 'Domains to announce for libp2p configuration',
+        string: true,
+      })
+      .option('dir', {
+        alias: 'd',
+        type: 'string',
+        description: 'Directory to storing node data',
+        default: getDefaultDir(),
+      })
+    ,
   handler: async (argv) => {
     let siteConfig: SiteConfig | undefined;
     try {
