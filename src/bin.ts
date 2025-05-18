@@ -2,12 +2,20 @@
 
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import runCommand from './commands/run.js';
 import runCommand from './commands/run';
+import { getDefaultDir } from './utils.js';
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
+  .option('dir', {
+    alias: 'd',
+    type: 'string',
+    description: 'Directory to storing node data',
+    default: getDefaultDir(),
+  })
   .command(runCommand)
-  .demandCommand(1, 'You need to specify a command.')
+  .demandCommand(1, 'A command must be specified.')
   .strict()
   .help()
   .alias('h', 'help')
