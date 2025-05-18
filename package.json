@@ -1,7 +1,8 @@
 {
   "name": "@riffcc/lens-node",
-  "version": "1.0.0",
-  "description": "CLI app to run your Lens node.",
+  "version": "0.1.0",
+  "description": "A command-line interface for running your Lens node.",
+  "type": "module",
   "main": "dist/bin.js",
   "types": "dist/types/bin.d.ts",
   "bin": {
