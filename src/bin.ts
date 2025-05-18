@@ -3,7 +3,7 @@
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
-import runCommand from './commands/run';
+import setupCommand from './commands/setup.js';
 import { getDefaultDir } from './utils.js';
 
 yargs(hideBin(process.argv))
@@ -14,6 +14,7 @@ yargs(hideBin(process.argv))
     description: 'Directory to storing node data',
     default: getDefaultDir(),
   })
+  .command(setupCommand)
   .command(runCommand)
   .demandCommand(1, 'A command must be specified.')
   .strict()
