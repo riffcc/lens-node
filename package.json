@@ -1,6 +1,6 @@
 {
   "name": "@riffcc/lens-node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A command-line interface for running your Lens node.",
   "type": "module",
   "main": "dist/bin.js",
@@ -16,7 +16,7 @@
     "build": "rimraf dist && tsc && chmod +x dist/bin.js",
     "prepublishOnly": "npm run build",
     "start": "node dist/bin.js",
-    "release": "pnpm build && pnpm publish"
+    "release": "pnpm build && (git commit -a -m 'version' || true) && pnpm publish"
   },
   "keywords": [
     "rifcc",
