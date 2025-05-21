@@ -2,6 +2,20 @@
   "name": "@riffcc/lens-node",
   "version": "0.1.2",
   "description": "A command-line interface for running your Lens node.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/riffcc/lens-node"
+  },
+  "author": "benya7",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "riffcc",
+    "lens",
+    "peerbit"
+  ],
   "type": "module",
   "main": "dist/bin.js",
   "types": "dist/types/bin.d.ts",
@@ -17,16 +31,6 @@
     "prepublishOnly": "npm run build",
     "start": "node dist/bin.js",
     "release": "pnpm build && (git commit -a -m 'version' || true) && pnpm publish"
-  },
-  "keywords": [
-    "rifcc",
-    "lens",
-    "peerbit"
-  ],
-  "author": "benya7",
-  "license": "ISC",
-  "publishConfig": {
-    "access": "public"
   },
   "packageManager": "pnpm@10.6.3",
   "dependencies": {

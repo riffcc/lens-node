@@ -1,0 +1,211 @@
+# @riffcc/lens-node
+
+![npm version](https://img.shields.io/npm/v/@riffcc/lens-node)
+<!-- ![license](https://img.shields.io/npm/l/@riffcc/lens-node) -->
+
+`@riffcc/lens-node` is a command-line interface (CLI) for setting up and running your Lens node. It utilizes [Peerbit](https://peerbit.org/) for peer-to-peer networking and the `@riffcc/lens-sdk` to interact with the Lens ecosystem.
+
+## Table of Contents
+
+- [@riffcc/lens-node](#riffcclens-node)
+  - [Table of Contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Getting Started](#getting-started)
+  - [Usage](#usage)
+    - [Global Options](#global-options)
+    - [Commands](#commands)
+      - [`setup`](#setup)
+      - [`run`](#run)
+  - [Configuration](#configuration)
+  - [Development](#development)
+
+## Prerequisites
+
+- A recent version of Node.js (v18.x or later recommended).
+- `pnpm` is recommended for development (as per `package.json`), but `npm` or `yarn` can be used for global installation.
+
+## Installation
+
+To install the `lens-node` CLI globally, run:
+
+```bash
+pnpm add -g @riffcc/lens-node
+```
+
+Or, using `npm`:
+
+```bash
+npm install -g @riffcc/lens-node
+```
+
+Or, using `yarn`:
+
+```bash
+yarn global add @riffcc/lens-node
+```
+
+After installation, the `lens-node` command will be available in your terminal.
+
+## Getting Started
+
+1. **Setup your Lens Node:**
+    The first step is to initialize your node. This will create a data directory, generate necessary cryptographic identities, and create a configuration file.
+
+    ```bash
+    lens-node setup
+    ```
+
+    This command will:
+    * Create a directory at `~/.lens-node` (or a custom path if specified with `--dir`).
+    * If the directory already exists, it will prompt you to confirm reconfiguration.
+    * Initialize a Peerbit client and a Lens Site.
+    * Save the configuration, including the Lens Site address, to `config.json` within the data directory.
+    * Print important details like your Peer ID, Public Key, and Site Address.
+
+2. **Run your Lens Node:**
+    Once setup is complete, you can start your node:
+
+    ```bash
+    lens-node run
+    ```
+
+    This will start the node daemon, connect to the Peerbit network, and open your Lens Site. An interactive menu will be available for further actions.
+
+## Usage
+
+The basic syntax for the CLI is:
+
+```bash
+lens-node <command> [options]
+```
+
+You can get help at any time:
+
+```bash
+lens-node --help
+lens-node <command> --help
+```
+
+### Global Options
+
+These options are available for most commands:
+
+* `--dir <path>`, `-d <path>`: Specifies the directory for storing node data.
+  * Default: `~/.lens-node` (e.g., `/home/user/.lens-node` on Linux or `/Users/user/.lens-node` on macOS).
+* `--help`, `-h`: Show help.
+* `--version`, `-v`: Show version number.
+
+### Commands
+
+#### `setup`
+
+Initializes and configures a new Lens node.
+
+```bash
+lens-node setup [options]
+```
+
+**Description:**
+Sets up the Lens node by creating a data directory, generating a Peerbit identity, creating a new Lens Site, and saving its address to a configuration file.
+
+**Options:**
+
+* `--dir <path>`, `-d <path>`
+  * Directory to store node data.
+  * Default: `~/.lens-node`
+
+**Example:**
+
+```bash
+# Setup with default directory
+lens-node setup
+
+# Setup with a custom directory
+lens-node setup --dir /path/to/my/lens-node-data
+```
+
+#### `run`
+
+Starts the Lens node daemon.
+
+```bash
+lens-node run [options]
+```
+
+**Description:**
+Starts the Lens node, connects to the Peerbit network, and opens the configured Lens Site. It provides an interactive menu for actions like authorizing accounts.
+
+**Options:**
+
+* `--dir <path>`, `-d <path>`
+  * Directory where node data (including `config.json`) is stored.
+  * Default: `~/.lens-node`
+* `--relay`
+  * Type: `boolean`
+  * Default: `false`
+  * Enable relay mode for the node.
+* `--domains <domain1> [domain2 ...]`
+  * Type: `array` (space-separated strings)
+  * Domains to announce for libp2p configuration (e.g., for external reachability).
+  * Example: `--domains /dns4/my-node.example.com/tcp/4001/ws`
+
+**Example:**
+
+```bash
+# Run the node using default configuration
+lens-node run
+
+# Run the node in relay mode
+lens-node run --relay
+
+# Run the node and announce specific domains
+lens-node run --domains /dns4/node1.example.com/tcp/4002/p2p/QmRelayPeerId /ip4/123.45.67.89/tcp/9000
+```
+
+**Interactive Menu Actions:**
+
+* **Authorise an account:** Prompts for a string public key and account type (Member or Admin) to authorize on the Lens Site.
+* **Shutdown Node:** Gracefully shuts down the node.
+
+The node can also be stopped by pressing `Ctrl+C`.
+
+## Configuration
+
+The `lens-node` stores its configuration in a `config.json` file located within the node's data directory (default: `~/.lens-node/config.json`).
+
+The primary piece of configuration stored is the Lens Site address:
+
+```json
+{
+  "address": "zd...siteAddress..."
+}
+```
+
+This file is automatically generated by the `lens-node setup` command and read by the `lens-node run` command. The configuration is validated against a schema on load.
+
+## Development
+
+If you want to contribute to or modify `lens-node`:
+
+**Clone the repository:**
+
+```bash
+git clone https://github.com/riffcc/lens-node.git
+
+cd lens-node
+```
+
+**Install dependencies (using pnpm):**
+The project is set up to use `pnpm`.
+
+```bash
+pnpm install
+```
+
+**Build the project:**
+This compiles the TypeScript code to JavaScript in the `dist` directory.
+
+```bash
+pnpm run build
+```
