@@ -1,6 +1,6 @@
 # @riffcc/lens-node
 
-![npm version](https://img.shields.io/npm/v/@riffcc/lens-node)
+![npm version](https://img.shields.io/npm/v/@riffcc/lens-node)[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/riffcc/lens-node)
 <!-- ![license](https://img.shields.io/npm/l/@riffcc/lens-node) -->
 
 `@riffcc/lens-node` is a command-line interface (CLI) for setting up and running your Lens node. It utilizes [Peerbit](https://peerbit.org/) for peer-to-peer networking and the `@riffcc/lens-sdk` to interact with the Lens ecosystem.
