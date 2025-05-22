@@ -5,7 +5,6 @@ import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
 import setupCommand from './commands/setup.js';
 import importCommand from './commands/import.js';
-import { getDefaultDir } from './utils.js';
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
