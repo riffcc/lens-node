@@ -65,12 +65,13 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-    // Handle unhandled promise rejections to avoid process hanging
     process.on('unhandledRejection', (reason, promise) => {
       console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      shutdown('unhandled_rejection');
     });
-
+    process.on('uncaughtException', (error) => {
+      console.error('Uncaught Exception:', error);
+    });
+    
     try {
       // Read configuration
       siteConfig = readConfig(argv.dir);
