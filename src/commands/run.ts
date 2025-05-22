@@ -4,9 +4,8 @@ import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types';
 import { getDefaultDir, readConfig } from '../utils.js';
-import { authorise, Site } from '@riffcc/lens-sdk';
+import { authorise, Site, DEDICATED_REPLICATOR_ARGS } from '@riffcc/lens-sdk';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
-
 type RunCommandArgs = {
   relay?: boolean;
   domains?: string[];
@@ -104,7 +103,12 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
 
       // Open the site
-      site = await client.open<Site>(siteConfig.address);
+      site = await client.open<Site>(
+        siteConfig.address,
+        {
+          args: DEDICATED_REPLICATOR_ARGS
+        }
+      );
 
       console.log('Lens Node is running. Press Ctrl+C to stop OR use the menu below.');
       console.log('--------------------------------------------------');
