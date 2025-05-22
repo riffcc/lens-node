@@ -5,10 +5,12 @@ import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types';
 import { getDefaultDir, readConfig } from '../utils.js';
 import { authorise, Site } from '@riffcc/lens-sdk';
+import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants';
 
 type RunCommandArgs = {
   relay?: boolean;
   domains?: string[];
+  listenPort: number;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -21,10 +23,14 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         description: 'Enable relay mode for the node',
         default: false,
       })
-      .option('domains', {
-        type: 'array',
-        description: 'Domains to announce for libp2p configuration',
-        string: true,
+      .option('domain', {
+        type: 'string',
+        description: 'Domain to announce for libp2p configuration',
+      })
+      .option('listenPort', {
+        type: 'number',
+        description: 'Port to listen on for libp2p configuration',
+        default: DEFAULT_LISTEN_PORT_LIBP2P,
       })
       .option('dir', {
         alias: 'd',
@@ -71,13 +77,23 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Set up libp2p configuration if domains are provided
       let libp2pConfig: Libp2pCreateOptions | undefined;
-      if (argv.domains && argv.domains.length > 0) {
-        libp2pConfig = {
-          addresses: {
-            announce: argv.domains,
-          },
-        };
-      }
+      const { domain, listenPort} = argv
+      libp2pConfig = {
+        addresses: {
+          announce: domain ?
+            [
+              `/dns4/${domain}/tcp/4002`,
+              `/dns4/${domain}/tcp/4003/wss`,
+            ] :
+            undefined,
+          listen: [
+            `/ip4/127.0.0.1/tcp/${listenPort}`,
+            `/ip4/127.0.0.1/tcp/${
+              listenPort !== 0 ? listenPort + 1 : listenPort
+            }/ws`,
+          ],
+        },
+      };
 
       // Initialize Peerbit client
       client = await Peerbit.create({

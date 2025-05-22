@@ -57,11 +57,11 @@ After installation, the `lens-node` command will be available in your terminal.
     ```
 
     This command will:
-    * Create a directory at `~/.lens-node` (or a custom path if specified with `--dir`).
-    * If the directory already exists, it will prompt you to confirm reconfiguration.
-    * Initialize a Peerbit client and a Lens Site.
-    * Save the configuration, including the Lens Site address, to `config.json` within the data directory.
-    * Print important details like your Peer ID, Public Key, and Site Address.
+    - Create a directory at `~/.lens-node` (or a custom path if specified with `--dir`).
+    - If the directory already exists, it will prompt you to confirm reconfiguration.
+    - Initialize a Peerbit client and a Lens Site.
+    - Save the configuration, including the Lens Site address, to `config.json` within the data directory.
+    - Print important details like your Peer ID, Public Key, and Site Address.
 
 2. **Run your Lens Node:**
     Once setup is complete, you can start your node:
@@ -91,10 +91,10 @@ lens-node <command> --help
 
 These options are available for most commands:
 
-* `--dir <path>`, `-d <path>`: Specifies the directory for storing node data.
-  * Default: `~/.lens-node` (e.g., `/home/user/.lens-node` on Linux or `/Users/user/.lens-node` on macOS).
-* `--help`, `-h`: Show help.
-* `--version`, `-v`: Show version number.
+- `--dir <path>`, `-d <path>`: Specifies the directory for storing node data.
+  - Default: `~/.lens-node` (e.g., `/home/user/.lens-node` on Linux or `/Users/user/.lens-node` on macOS).
+- `--help`, `-h`: Show help.
+- `--version`, `-v`: Show version number.
 
 ### Commands
 
@@ -111,9 +111,9 @@ Sets up the Lens node by creating a data directory, generating a Peerbit identit
 
 **Options:**
 
-* `--dir <path>`, `-d <path>`
-  * Directory to store node data.
-  * Default: `~/.lens-node`
+- `--dir <path>`, `-d <path>`
+  - Directory to store node data.
+  - Default: `~/.lens-node`
 
 **Example:**
 
@@ -138,17 +138,21 @@ Starts the Lens node, connects to the Peerbit network, and opens the configured 
 
 **Options:**
 
-* `--dir <path>`, `-d <path>`
-  * Directory where node data (including `config.json`) is stored.
-  * Default: `~/.lens-node`
-* `--relay`
-  * Type: `boolean`
-  * Default: `false`
-  * Enable relay mode for the node.
-* `--domains <domain1> [domain2 ...]`
-  * Type: `array` (space-separated strings)
-  * Domains to announce for libp2p configuration (e.g., for external reachability).
-  * Example: `--domains /dns4/my-node.example.com/tcp/4001/ws`
+- `--dir <path>`, `-d <path>`
+  - Directory where node data (including `config.json`) is stored.
+  - Default: `~/.lens-node`
+- `--relay`
+  - Type: `boolean`
+  - Default: `false`
+  - Enable relay mode for the node.
+- `--domain <domain1>`
+  - Type: `string`
+  - Domain to announce for libp2p configuration (e.g., for external reachability).
+  - Example: `--domain my-node.example.com`
+- `--listenPort <port>`
+  - Type: `number`
+  - Default: `8001`
+  - Port to listen on for libp2p configuration.
 
 **Example:**
 
@@ -165,8 +169,8 @@ lens-node run --domains /dns4/node1.example.com/tcp/4002/p2p/QmRelayPeerId /ip4/
 
 **Interactive Menu Actions:**
 
-* **Authorise an account:** Prompts for a string public key and account type (Member or Admin) to authorize on the Lens Site.
-* **Shutdown Node:** Gracefully shuts down the node.
+- **Authorise an account:** Prompts for a string public key and account type (Member or Admin) to authorize on the Lens Site.
+- **Shutdown Node:** Gracefully shuts down the node.
 
 The node can also be stopped by pressing `Ctrl+C`.
 
