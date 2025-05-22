@@ -5,7 +5,7 @@ import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types';
 import { getDefaultDir, readConfig } from '../utils.js';
 import { authorise, Site } from '@riffcc/lens-sdk';
-import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants';
+import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 
 type RunCommandArgs = {
   relay?: boolean;
