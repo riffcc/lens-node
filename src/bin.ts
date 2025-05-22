@@ -4,12 +4,14 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
 import setupCommand from './commands/setup.js';
+import importCommand from './commands/import.js';
 import { getDefaultDir } from './utils.js';
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
   .command(setupCommand)
   .command(runCommand)
+  .command(importCommand)
   .demandCommand(1, 'A command must be specified.')
   .strict()
   .help()
