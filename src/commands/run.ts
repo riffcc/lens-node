@@ -2,10 +2,13 @@ import inquirer from 'inquirer';
 import { select } from '@inquirer/prompts';
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
-import { GlobalOptions, SiteConfig } from '../types';
-import { getDefaultDir, readConfig } from '../utils.js';
+import { GlobalOptions, SiteConfig } from '../types.js';
+import { getDefaultDir, readConfig, saveConfig } from '../utils.js';
 import { authorise, Site, DEDICATED_REPLICATOR_ARGS } from '@riffcc/lens-sdk';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
+import fs from 'node:fs';
+
+
 type RunCommandArgs = {
   relay?: boolean;
   domains?: string[];
@@ -72,7 +75,19 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     });
     
     try {
+      const { dir } = argv;
+      const siteAddress = process.env.SITE_ADDRESS;
+      const bootstrappers = process.env.BOOTSTRAPPERS;
+
       // Read configuration
+      if (siteAddress) {
+        console.log(`Using bootstrapped site address ${siteAddress}, resetting the config..`);
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true });
+        console.log(`Node directory cleared and ready for new configuration at: ${dir}`);
+        saveConfig({ address: siteAddress }, dir);
+      }
+
       siteConfig = readConfig(argv.dir);
 
       // Set up libp2p configuration if domains are provided
@@ -101,6 +116,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         relay: argv.relay,
         libp2p: libp2pConfig,
       });
+
+      if (bootstrappers) {
+        console.log('Dialing bootstrappers...');
+        const promises = bootstrappers
+            .split(',')
+            .map((b) => client?.dial(b.trim()));
+        const dialingResult = await Promise.allSettled(promises);
+        console.log(`
+          ${dialingResult.filter(x => x.status === 'fulfilled').length}/${dialingResult.length}bootstrappers addresses were dialed successfuly.
+        `);
+      }
 
       // Open the site
       site = await client.open<Site>(
