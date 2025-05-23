@@ -4,7 +4,7 @@ import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types.js';
 import { getDefaultDir, readConfig, saveConfig } from '../utils.js';
-import { authorise, Site, DEDICATED_REPLICATOR_ARGS } from '@riffcc/lens-sdk';
+import { authorise, Site, DEDICATED_SITE_ARGS, ADMIN_SITE_ARGS } from '@riffcc/lens-sdk';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
 
@@ -13,6 +13,7 @@ type RunCommandArgs = {
   relay?: boolean;
   domains?: string[];
   listenPort: number;
+  onlyReplicate?: boolean;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -39,6 +40,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'string',
         description: 'Directory to storing node data',
         default: getDefaultDir(),
+      })
+      .option('onlyReplicate', {
+        type: 'boolean',
+        description: 'Run the node in replicator mode',
       }),
   handler: async (argv) => {
     let siteConfig: SiteConfig | undefined;
@@ -73,14 +78,14 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     process.on('uncaughtException', (error) => {
       console.error('Uncaught Exception:', error);
     });
-    
+
     try {
-      const { dir } = argv;
+      const { dir, onlyReplicate } = argv;
       const siteAddress = process.env.SITE_ADDRESS;
       const bootstrappers = process.env.BOOTSTRAPPERS;
 
       // Read configuration
-      if (siteAddress) {
+      if (siteAddress && onlyReplicate) {
         console.log(`Using bootstrapped site address ${siteAddress}, resetting the config..`);
         fs.rmSync(dir, { recursive: true, force: true });
         fs.mkdirSync(dir, { recursive: true });
@@ -92,7 +97,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Set up libp2p configuration if domains are provided
       let libp2pConfig: Libp2pCreateOptions | undefined;
-      const { domain, listenPort} = argv
+      const { domain, listenPort } = argv
       libp2pConfig = {
         addresses: {
           announce: domain ?
@@ -103,8 +108,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             undefined,
           listen: [
             `/ip4/127.0.0.1/tcp/${listenPort}`,
-            `/ip4/127.0.0.1/tcp/${
-              listenPort !== 0 ? listenPort + 1 : listenPort
+            `/ip4/127.0.0.1/tcp/${listenPort !== 0 ? listenPort + 1 : listenPort
             }/ws`,
           ],
         },
@@ -120,8 +124,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       if (bootstrappers) {
         console.log('Dialing bootstrappers...');
         const promises = bootstrappers
-            .split(',')
-            .map((b) => client?.dial(b.trim()));
+          .split(',')
+          .map((b) => client?.dial(b.trim()));
         const dialingResult = await Promise.allSettled(promises);
         console.log(`
           ${dialingResult.filter(x => x.status === 'fulfilled').length}/${dialingResult.length}bootstrappers addresses were dialed successfuly.
@@ -132,7 +136,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       site = await client.open<Site>(
         siteConfig.address,
         {
-          args: DEDICATED_REPLICATOR_ARGS
+          args: onlyReplicate ? DEDICATED_SITE_ARGS : ADMIN_SITE_ARGS
         }
       );
 
@@ -146,72 +150,75 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       console.log('--------------------------------------------------\n');
 
       // Menu loop
-      while (!isShuttingDown) {
-        try {
-          const answers = await inquirer.prompt(
-            [
-              {
-                type: 'list',
-                name: 'action',
-                message: 'Actions:',
-                choices: [
-                  { name: 'Authorise an account', value: 'authorise' },
-                  new inquirer.Separator(),
-                  { name: 'Shutdown Node', value: 'shutdown' },
-                ],
-              },
-            ],
-            {
-              signal: {
-                addEventListener: (event: string, _listener: (...args: any[]) => void) => {
-                  if (event === 'SIGINT') {
-                    shutdown('SIGINT');
-                  }
-                },
-                removeEventListener: () => { },
-              },
-            }
-          );
-
-          switch (answers.action) {
-            case 'authorise':
-              const { stringPubkicKey } = await inquirer.prompt([
+      if (!onlyReplicate) {
+        while (!isShuttingDown) {
+          try {
+            const answers = await inquirer.prompt(
+              [
                 {
-                  type: 'input',
-                  name: 'stringPubkicKey',
-                  message: 'Enter the string public key of the account:',
+                  type: 'list',
+                  name: 'action',
+                  message: 'Actions:',
+                  choices: [
+                    { name: 'Authorise an account', value: 'authorise' },
+                    new inquirer.Separator(),
+                    { name: 'Shutdown Node', value: 'shutdown' },
+                  ],
                 },
-              ]);
-              const accountType = await select({
-                message: 'Select the account type',
-                choices: [
-                  { name: 'Member', value: 1 },
-                  { name: 'Admin', value: 2 },
-                ],
-              });
-
-              try {
-                await authorise(site, accountType, stringPubkicKey);
-                console.log('Account authorized successfully.');
-              } catch (error) {
-                console.error(`Error on authorizing account: ${(error as Error).message}`);
+              ],
+              {
+                signal: {
+                  addEventListener: (event: string, _listener: (...args: any[]) => void) => {
+                    if (event === 'SIGINT') {
+                      shutdown('SIGINT');
+                    }
+                  },
+                  removeEventListener: () => { },
+                },
               }
+            );
+
+            switch (answers.action) {
+              case 'authorise':
+                const { stringPubkicKey } = await inquirer.prompt([
+                  {
+                    type: 'input',
+                    name: 'stringPubkicKey',
+                    message: 'Enter the string public key of the account:',
+                  },
+                ]);
+                const accountType = await select({
+                  message: 'Select the account type',
+                  choices: [
+                    { name: 'Member', value: 1 },
+                    { name: 'Admin', value: 2 },
+                  ],
+                });
+
+                try {
+                  await authorise(site, accountType, stringPubkicKey);
+                  console.log('Account authorized successfully.');
+                } catch (error) {
+                  console.error(`Error on authorizing account: ${(error as Error).message}`);
+                }
+                break;
+              case 'shutdown':
+                await shutdown('menu_shutdown_request');
+                break;
+            }
+          } catch (error: any) {
+            if (isShuttingDown) {
               break;
-            case 'shutdown':
-              await shutdown('menu_shutdown_request');
-              break;
-          }
-        } catch (error: any) {
-          if (isShuttingDown) {
-            break;
-          }
-          if (error.message.includes('User force closed the prompt with SIGINT')) {
-            await shutdown('SIGINT');
-          } else {
-            console.error('Error in menu loop:', error.message || error);
+            }
+            if (error.message.includes('User force closed the prompt with SIGINT')) {
+              await shutdown('SIGINT');
+            } else {
+              console.error('Error in menu loop:', error.message || error);
+            }
           }
         }
       }
+
     } catch (error) {
       console.error('Fatal error:', (error as Error).message);
       await shutdown('fatal_error');
