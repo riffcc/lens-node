@@ -17,13 +17,17 @@ yargs(hideBin(process.argv))
   .alias('h', 'help')
   .version()
   .alias('v', 'version')
-  .fail((msg, err, yargsInstance) => {
+  .fail((
+    msg: any,
+    err: { message: any; },
+    yargsInstance: { showHelp: () => void; }
+  ) => {
     if (err) {
       console.error('Error:', err.message);
     } else if (msg) {
-      console.error('Error:', msg);
+      console.error(`Error: ${msg}\n`); // Then print the specific message
     }
-    console.error('\nFor help, run: lens-node --help');
+    yargsInstance.showHelp(); // Show yargs generated help for context
     process.exit(1);
   })
   .parse();

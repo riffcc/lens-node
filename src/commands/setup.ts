@@ -1,71 +1,49 @@
 import type { CommandModule } from 'yargs';
-import { getDefaultDir, saveConfig } from '../utils.js';
-import fs from 'node:fs';
-import confirm from "@inquirer/confirm";
+import { handleDirectorySetup, logOperationSuccess, saveConfig } from '../utils.js';
 import { Peerbit } from 'peerbit';
-import { Site } from '@riffcc/lens-sdk';
+import { ADMIN_SITE_ARGS, Site } from '@riffcc/lens-sdk';
 import { GlobalOptions } from '../types.js';
-import yargs from 'yargs';
+import { dirOption } from './commonOptions.js';
 
 const setupCommand: CommandModule<{}, GlobalOptions> = {
   command: 'setup',
   describe: 'Setup the lens node and generate a new ID.',
-  builder: (yargs) => 
+  builder: (yargs) =>
     yargs
-      .option('dir', {
-        alias: 'd',
-        type: 'string',
-        description: 'Directory to storing node data',
-        default: getDefaultDir(),
-      })
-    ,
+      .option('dir', dirOption)
+  ,
   handler: async (argv) => {
     const directory = argv.dir;
 
     try {
-      if (fs.existsSync(directory)) {
-        const overwrite = await confirm({
-          message: `The node directory "${directory}" already exists. Do you want to reconfigure? This action is irreversible.`,
-          default: false,
-        });
-
-        if (overwrite) {
-          fs.rmSync(directory, { recursive: true, force: true });
-          fs.mkdirSync(directory, { recursive: true });
-          console.log(`Node directory cleared and ready for new configuration at: ${directory}`);
-        } else {
-          console.log(`Setup aborted by user. Existing directory "${directory}" was not modified.`);
-          process.exit(0);
-        }
-      } else {
-        fs.mkdirSync(directory, { recursive: true });
-        console.log(`Node directory created at: ${directory}`);
+      const proceed = await handleDirectorySetup(directory, 'setup');
+      if (!proceed) {
+        process.exit(0);
       }
+
+      const client = await Peerbit.create({ directory });
+      const siteProgram = new Site(client.identity.publicKey);
+      const site = await client.open(siteProgram, { args: ADMIN_SITE_ARGS });
+      const configFilePath = saveConfig({ address: site.address }, directory);
+
+      logOperationSuccess({
+        startMessage: '\nLens Node setup complete!',
+        directory,
+        configFilePath,
+        peerId: client.peerId.toString(),
+        publicKey: client.identity.publicKey.toString(),
+        siteAddress: site.address,
+        finalMessage: "You can now run your node using: lens-node run"
+      });
+
+      await siteProgram.close();
+      await client.stop();
+      process.exit(0);
     } catch (e) {
-      console.error(`Error during directory setup at "${directory}": ${(e as Error).message}`);
+      console.error(`Error during setup: ${(e as Error).message}`);
       process.exit(1);
     }
-
-    const client = await Peerbit.create({
-      directory
-    })
-    
-    const siteProgram = new Site(client.identity.publicKey)
-    const site = await client.open(siteProgram);
-
-    const configFilePath = saveConfig({ address: site.address.toString() }, directory);
-
-    console.log('\nLens Node setup complete!');
-    console.log('--------------------------------------------------');
-    console.log(`Node Directory: ${directory}`);
-    console.log(`Configuration saved to: ${configFilePath}`);
-    console.log(`Peer ID: ${client.peerId.toString()}`);
-    console.log(`Node Public Key: ${client.identity.publicKey.toString()}`);
-    console.log(`Site Address: ${site.address.toString()}`);
-    console.log('--------------------------------------------------');
-    console.log("You can now run your node using: lens-node run");
-    process.exit(0)
-  },
+  }
 };
 
 export default setupCommand;

@@ -3,10 +3,11 @@ import { select } from '@inquirer/prompts';
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions, SiteConfig } from '../types.js';
-import { getDefaultDir, readConfig, saveConfig } from '../utils.js';
+import { logOperationSuccess, readConfig, saveConfig } from '../utils.js';
 import { authorise, Site, DEDICATED_SITE_ARGS, ADMIN_SITE_ARGS } from '@riffcc/lens-sdk';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
+import { dirOption } from './commonOptions.js';
 
 
 type RunCommandArgs = {
@@ -21,6 +22,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
   describe: 'Starts node daemon.',
   builder: (yargs) =>
     yargs
+      .option('dir', dirOption)
       .option('relay', {
         type: 'boolean',
         description: 'Enable relay mode for the node',
@@ -34,12 +36,6 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'number',
         description: 'Port to listen on for libp2p configuration',
         default: DEFAULT_LISTEN_PORT_LIBP2P,
-      })
-      .option('dir', {
-        alias: 'd',
-        type: 'string',
-        description: 'Directory to storing node data',
-        default: getDefaultDir(),
       })
       .option('onlyReplicate', {
         type: 'boolean',
@@ -116,7 +112,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Initialize Peerbit client
       client = await Peerbit.create({
-        directory: argv.dir,
+        directory: dir,
         relay: argv.relay,
         libp2p: libp2pConfig,
       });
@@ -132,7 +128,6 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         `);
       }
 
-      // Open the site
       site = await client.open<Site>(
         siteConfig.address,
         {
@@ -140,14 +135,14 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         }
       );
 
-      console.log('Lens Node is running. Press Ctrl+C to stop OR use the menu below.');
-      console.log('--------------------------------------------------');
-      console.log(`Node Directory: ${argv.dir}`);
-      console.log(`Peer ID: ${client.peerId.toString()}`);
-      console.log(`Node Public Key: ${client.identity.publicKey.toString()}`);
-      console.log(`Site Address: ${site.address}`);
-      console.log(`Listening on: ${JSON.stringify(client.getMultiaddrs(), null, 2)}`);
-      console.log('--------------------------------------------------\n');
+      logOperationSuccess({
+        startMessage: 'Lens Node is running. Press Ctrl+C to stop OR use the menu below.',
+        directory: dir,
+        peerId: client.peerId.toString(),
+        publicKey: client.identity.publicKey.toString(),
+        siteAddress: site.address,
+        listeningOn: client.getMultiaddrs().map(m => m.toString()),
+      });
 
       // Menu loop
       if (!onlyReplicate) {

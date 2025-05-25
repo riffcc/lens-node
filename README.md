@@ -196,6 +196,10 @@ Starts the Lens node, connects to the Peerbit network, and opens the configured 
   - Type: `number`
   - Default: `8001`
   - Port to listen on for libp2p configuration.
+- `--onlyReplicate`
+  - Type: `boolean`
+  - Default: `false`
+  - Run the node in replicator mode. This uses replication settings to run this node as dedicated replicator and disables the interactive menu.
 
 **Example:**
 

@@ -26,6 +26,9 @@ importers:
       inquirer:
         specifier: ^12.6.1
         version: 12.6.1(@types/node@22.15.18)
+      multiformats:
+        specifier: ^13.3.6
+        version: 13.3.6
       peerbit:
         specifier: ^4.1.36
         version: 4.1.36(react-native@0.79.2(@babel/core@7.27.1)(react@19.1.0))
@@ -1980,8 +1983,8 @@ packages:
     resolution: {integrity: sha512-kh8ARjh8rMN7Du2igDRO9QJnqCb2xYTJxyQYK7vJJS4TvLLmsbyhiKpSW+t+y26gyOyMd0riphX0GeWKU3ky5g==}
     engines: {node: '>=12.13'}
 
-  multiformats@13.3.4:
-    resolution: {integrity: sha512-JXpM5p9TpJ/BHsUtmLaWuRN0ft0gJPGa6BhkX2KXjFHvkFQOQkDManoar3gx0JsTLNrOojBE2Mj4hFxohGnXZA==}
+  multiformats@13.3.6:
+    resolution: {integrity: sha512-yakbt9cPYj8d3vi/8o/XWm61MrOILo7fsTL0qxNx6zS0Nso6K5JqqS2WV7vK/KSuDBvrW3KfCwAdAgarAgOmww==}
 
   mute-stream@2.0.0:
     resolution: {integrity: sha512-WWdIxpyjEn+FhQJQQv9aQAYlHoNVdzIzUySNV1gHUPDSdZJ3yZn7pAAbQcV7B56Mvu881q9FZV+0Vx2xC44VWA==}
@@ -3283,7 +3286,7 @@ snapshots:
   '@ipld/dag-cbor@9.2.3':
     dependencies:
       cborg: 4.2.10
-      multiformats: 13.3.4
+      multiformats: 13.3.6
 
   '@ipshipyard/node-datachannel@0.26.6':
     dependencies:
@@ -3401,7 +3404,7 @@ snapshots:
       any-signal: 4.1.1
       it-protobuf-stream: 2.0.2
       it-stream-types: 2.0.2
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       nanoid: 5.1.5
       progress-events: 1.0.1
       protons-runtime: 5.5.0
@@ -3414,7 +3417,7 @@ snapshots:
       '@libp2p/interface': 2.9.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       protons-runtime: 5.5.0
       uint8arraylist: 2.4.8
       uint8arrays: 5.1.0
@@ -3448,7 +3451,7 @@ snapshots:
       '@multiformats/multiaddr': 12.4.0
       it-pushable: 3.2.3
       it-stream-types: 2.0.2
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       progress-events: 1.0.1
       uint8arraylist: 2.4.8
 
@@ -3460,7 +3463,7 @@ snapshots:
       asn1js: 3.0.6
       interface-datastore: 8.3.1
       merge-options: 3.0.4
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       sanitize-filename: 1.6.3
       uint8arrays: 5.1.0
 
@@ -3469,7 +3472,7 @@ snapshots:
       '@libp2p/interface': 2.9.0
       '@multiformats/multiaddr': 12.4.0
       interface-datastore: 8.3.1
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       weald: 1.0.4
 
   '@libp2p/multistream-select@6.0.22':
@@ -3489,13 +3492,13 @@ snapshots:
       '@libp2p/interface': 2.9.0
       '@libp2p/peer-id': 5.1.2
       '@libp2p/utils': 6.6.2
-      multiformats: 13.3.4
+      multiformats: 13.3.6
 
   '@libp2p/peer-id@5.1.2':
     dependencies:
       '@libp2p/crypto': 5.1.1
       '@libp2p/interface': 2.9.0
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       uint8arrays: 5.1.0
 
   '@libp2p/peer-record@8.0.27':
@@ -3505,7 +3508,7 @@ snapshots:
       '@libp2p/peer-id': 5.1.2
       '@libp2p/utils': 6.6.2
       '@multiformats/multiaddr': 12.4.0
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       protons-runtime: 5.5.0
       uint8-varint: 2.0.4
       uint8arraylist: 2.4.8
@@ -3521,7 +3524,7 @@ snapshots:
       interface-datastore: 8.3.1
       it-all: 3.0.8
       mortice: 3.0.6
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       protons-runtime: 5.5.0
       uint8arraylist: 2.4.8
       uint8arrays: 5.1.0
@@ -3586,7 +3589,7 @@ snapshots:
       it-protobuf-stream: 2.0.2
       it-pushable: 3.2.3
       it-stream-types: 2.0.2
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       p-defer: 4.0.1
       p-timeout: 6.1.4
       p-wait-for: 5.0.2
@@ -3634,7 +3637,7 @@ snapshots:
     dependencies:
       '@chainsafe/is-ip': 2.1.0
       '@multiformats/multiaddr': 12.4.0
-      multiformats: 13.3.4
+      multiformats: 13.3.6
 
   '@multiformats/multiaddr-to-uri@11.0.0':
     dependencies:
@@ -3645,7 +3648,7 @@ snapshots:
       '@chainsafe/is-ip': 2.1.0
       '@chainsafe/netmask': 2.0.0
       '@multiformats/dns': 1.0.6
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       uint8-varint: 2.0.4
       uint8arrays: 5.1.0
 
@@ -3793,7 +3796,7 @@ snapshots:
       '@peerbit/blocks-interface': 1.4.4
       '@peerbit/crypto': 2.3.8
       '@peerbit/stream': 4.3.4
-      multiformats: 13.3.4
+      multiformats: 13.3.6
 
   '@peerbit/cache@2.1.3':
     dependencies:
@@ -5074,7 +5077,7 @@ snapshots:
       it-merge: 3.0.11
       it-parallel: 3.0.11
       merge-options: 3.0.4
-      multiformats: 13.3.4
+      multiformats: 13.3.6
       p-defer: 4.0.1
       p-retry: 6.2.1
       progress-events: 1.0.1
@@ -5359,7 +5362,7 @@ snapshots:
 
   ms@3.0.0-canary.1: {}
 
-  multiformats@13.3.4: {}
+  multiformats@13.3.6: {}
 
   mute-stream@2.0.0: {}
 
@@ -5938,7 +5941,7 @@ snapshots:
 
   uint8arrays@5.1.0:
     dependencies:
-      multiformats: 13.3.4
+      multiformats: 13.3.6
 
   undici-types@6.21.0: {}
 
