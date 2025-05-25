@@ -17,6 +17,7 @@
     - [Commands](#commands)
       - [`setup`](#setup)
       - [`import`](#import)
+      - [`export`](#export)
       - [`run`](#run)
   - [Configuration](#configuration)
   - [Development](#development)
@@ -166,6 +167,44 @@ lens-node import
 
 # Import with a custom directory
 lens-node import --dir /path/to/my/lens-node-data
+```
+
+#### `export`
+
+Exports the current node configuration to a specified format (JSON or Vite .env).
+
+```bash
+lens-node export [options]
+```
+
+**Description:**
+Reads the `config.json` from the node data directory and outputs it. This is useful for backing up your configuration or integrating with other tools.
+
+**Options:**
+
+- `--dir <path>`, `-d <path>`
+  - Specifies the directory where node data (including `config.json`) is stored.
+  - Default: `~/.lens-node`
+- `--format <json|vite>`, `-f <json|vite>` (Required)
+  - The format for the exported configuration.
+    - `json`: Outputs the full `config.json` content.
+    - `vite`: Outputs a `.env` style file with `VITE_ADDRESS=<site_address>`.
+- `--output <filepath>`, `-o <filepath>`
+  - Optional. The file path to save the exported configuration.
+  - If not provided, the configuration will be printed to standard output (your terminal).
+  - If a directory path is provided, a default filename (e.g., `config_export.json` or `config_export.env`) will be used within that directory.
+
+**Examples:**
+
+```bash
+# Export configuration as JSON to the terminal
+lens-node export --format json
+
+# Export configuration as a Vite .env file and save it to .env in the current directory
+lens-node export --format vite --output .env
+
+# Export configuration as JSON from a custom data directory and save to a backup file
+lens-node export --format json --dir /path/to/my-data --output /backups/lens_config_backup.json
 ```
 
 #### `run`
