@@ -835,37 +835,105 @@ async function unsubscribeSite(lensService: LensService) {
       return;
     }
 
-    const { confirm } = await inquirer.prompt([
+    const subToDelete = subscriptions.find(s => s.id === subscriptionId);
+    const siteName = subToDelete?.[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed Lens';
+    const siteId = subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY];
+    
+    // Enhanced confirmation with content removal option
+    console.log(`\n📋 Unsubscribe from: ${siteName}`);
+    console.log(`🔗 Site ID: ${siteId}`);
+    
+    const unsubscribeOptions = await inquirer.prompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: 'Are you sure you want to unsubscribe?',
+        message: `Are you sure you want to unsubscribe from "${siteName}"?`,
         default: false,
+      },
+      {
+        type: 'confirm',
+        name: 'removeContent',
+        message: '🗑️  Remove all federated content from this Lens? (This will delete all releases that came from this subscription)',
+        default: false,
+        when: (answers) => answers.confirm, // Only ask if they confirmed unsubscribe
       },
     ]);
 
-    if (!confirm) {
-      console.log('\nUnsubscribe cancelled.\n');
+    if (!unsubscribeOptions.confirm) {
+      console.log('\n❌ Unsubscribe cancelled.\n');
       return;
     }
 
-    const subToDelete = subscriptions.find(s => s.id === subscriptionId);
+    // Show summary of what will happen
+    console.log('\n📊 Unsubscribe Summary:');
+    console.log(`   • Lens: ${siteName}`);
+    console.log(`   • Remove subscription: ✅ Yes`);
+    console.log(`   • Remove federated content: ${unsubscribeOptions.removeContent ? '✅ Yes' : '❌ No'}`);
+    
+    if (unsubscribeOptions.removeContent) {
+      console.log('\n⚠️  WARNING: This will permanently delete all content that was federated from this Lens!');
+      console.log('   Content originally created on your own site will NOT be affected.');
+      
+      const finalConfirm = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'finalConfirm',
+          message: 'Continue with content removal?',
+          default: false,
+        },
+      ]);
+      
+      if (!finalConfirm.finalConfirm) {
+        console.log('\n❌ Unsubscribe cancelled.\n');
+        return;
+      }
+    }
+
     logSubscriptionEvent('subscription:delete:start', {
       id: subscriptionId,
-      siteId: subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY],
+      siteId,
+      siteName,
+      removeContent: unsubscribeOptions.removeContent,
     });
     
+    // Remove federated content if requested
+    let removedContentCount = 0;
+    if (unsubscribeOptions.removeContent && siteId) {
+      console.log('\n🧹 Removing federated content...');
+      try {
+        removedContentCount = await removeFederatedContent(lensService, siteId, siteName);
+      } catch (contentRemovalError) {
+        logError('Failed to remove federated content', contentRemovalError, {
+          siteId,
+          siteName,
+        });
+        console.error(`⚠️  Warning: Failed to remove some federated content: ${(contentRemovalError as Error).message}`);
+        console.log('Continuing with subscription removal...');
+      }
+    }
+    
+    // Remove the subscription
     const result = await lensService.deleteSubscription({ id: subscriptionId });
 
     if (result.success) {
       logSubscriptionEvent('subscription:delete:success', {
         id: subscriptionId,
-        siteId: subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY],
+        siteId,
+        siteName,
+        removeContent: unsubscribeOptions.removeContent,
+        removedContentCount,
       });
-      console.log('\n✅ Successfully unsubscribed!\n');
+      
+      console.log('\n✅ Successfully unsubscribed!');
+      if (unsubscribeOptions.removeContent) {
+        console.log(`🗑️  Removed ${removedContentCount} federated releases from "${siteName}"`);
+      }
+      console.log('');
     } else {
       logError('Failed to delete subscription', new Error(result.error || 'Unknown error'), {
         id: subscriptionId,
+        siteId,
+        removedContentCount,
       });
       console.error(`\n❌ Failed to unsubscribe: ${result.error}\n`);
     }
@@ -1043,54 +1111,92 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
                 replicatedReleases,
               });
               
-              // Get all releases from the subscribed site
-              const subscriptionReleases = await subscribedSite.releases.index.search(new SearchRequest({}));
+              // Get releases from the subscribed site in larger batches
+              const subscriptionReleases = await subscribedSite.releases.index.search(new SearchRequest({
+                fetch: 1000 // Request up to 1000 releases at once
+              }));
               
-              // Add subscription content to local site's releases
+              logger.info('Fetched subscription releases', {
+                siteId,
+                totalReleases: subscriptionReleases.length,
+                fetchLimit: 1000,
+              });
+              
+              // Get existing releases once for efficiency
+              const existingReleases = await site.releases.index.search(new SearchRequest({
+                fetch: 1000 // Get more existing releases to check against
+              }));
+              const existingIds = new Set(existingReleases.map((release: any) => release.id));
+              
+              logger.info('Federation batch processing', {
+                siteId,
+                availableReleases: subscriptionReleases.length,
+                existingLocalReleases: existingReleases.length,
+                batchSize: 100,
+              });
+              
+              // Add subscription content to local site's releases with batching
               let addedCount = 0;
-              for (const release of subscriptionReleases) {
-                try {
-                  // Check if this release already exists in local site
-                  const existingReleases = await site.releases.index.search(new SearchRequest({}));
-                  const releaseExists = existingReleases.some((existing: any) => existing.id === release.id);
-                  
-                  if (!releaseExists) {
-                    // Add federated flag to indicate this came from a subscription
-                    const federatedRelease = {
-                      ...release,
-                      federatedFrom: siteId,
-                      federatedAt: new Date().toISOString(),
-                    };
+              const federationBatchSize = 10; // Process 10 releases at a time to avoid overwhelming the system
+              
+              for (let i = 0; i < subscriptionReleases.length; i += federationBatchSize) {
+                const batch = subscriptionReleases.slice(i, i + federationBatchSize);
+                
+                logger.debug('Processing federation batch', {
+                  siteId,
+                  batchIndex: Math.floor(i / federationBatchSize) + 1,
+                  totalBatches: Math.ceil(subscriptionReleases.length / federationBatchSize),
+                  batchSize: batch.length,
+                });
+                
+                for (const release of batch) {
+                  try {
+                    // Check if this release already exists using the pre-loaded set
+                    const releaseExists = existingIds.has(release.id);
                     
-                    // Use the LensService to add the federated release
-                    try {
-                      const addResult = await lensService.addRelease(federatedRelease);
-                      if (addResult.success) {
-                        addedCount++;
-                        logger.debug('Federated release added to local site', {
+                    if (!releaseExists) {
+                      // Add federated flag to indicate this came from a subscription
+                      const federatedRelease = {
+                        ...release,
+                        federatedFrom: siteId,
+                        federatedAt: new Date().toISOString(),
+                      };
+                      
+                      // Use the LensService to add the federated release
+                      try {
+                        const addResult = await lensService.addRelease(federatedRelease);
+                        if (addResult.success) {
+                          addedCount++;
+                          existingIds.add(release.id); // Add to set to avoid duplicates in same session
+                          logger.debug('Federated release added to local site', {
+                            releaseId: release.id,
+                            sourcesite: siteId,
+                            title: release.name || 'Untitled',
+                          });
+                        } else {
+                          logger.debug('Failed to add federated release', {
+                            releaseId: release.id,
+                            error: addResult.error,
+                          });
+                        }
+                      } catch (addError) {
+                        logger.debug('LensService add failed', {
                           releaseId: release.id,
-                          sourcesite: siteId,
-                          title: release.name || 'Untitled',
-                        });
-                      } else {
-                        logger.debug('Failed to add federated release', {
-                          releaseId: release.id,
-                          error: addResult.error,
+                          error: addError instanceof Error ? addError.message : addError,
                         });
                       }
-                    } catch (addError) {
-                      // Fallback: try direct insertion
-                      logger.debug('LensService add failed, trying direct insertion', {
-                        releaseId: release.id,
-                        error: addError instanceof Error ? addError.message : addError,
-                      });
                     }
+                  } catch (releaseError) {
+                    logger.debug('Error federating individual release', {
+                      releaseId: release.id,
+                      error: releaseError instanceof Error ? releaseError.message : releaseError,
+                    });
                   }
-                } catch (releaseError) {
-                  logger.debug('Error federating individual release', {
-                    releaseId: release.id,
-                    error: releaseError instanceof Error ? releaseError.message : releaseError,
-                  });
+                }
+                
+                // Small delay between batches to avoid overwhelming the system
+                if (i + federationBatchSize < subscriptionReleases.length) {
+                  await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
                 }
               }
               
@@ -1116,22 +1222,49 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
           // Set up periodic sync monitoring for this subscription
           const syncInterval = setInterval(async () => {
             try {
-              const currentReleases = (await subscribedSite.releases.index.search(new SearchRequest({}))).length;
-              const currentFeatured = (await subscribedSite.featuredReleases.index.search(new SearchRequest({}))).length;
+              // Use larger fetch limits for monitoring
+              const currentReleases = (await subscribedSite.releases.index.search(new SearchRequest({
+                fetch: 1000
+              }))).length;
+              const currentFeatured = (await subscribedSite.featuredReleases.index.search(new SearchRequest({
+                fetch: 1000
+              }))).length;
+              const localReleases = (await site.releases.index.search(new SearchRequest({
+                fetch: 1000
+              }))).length;
               
               logger.info('Subscription sync update', {
                 siteId,
-                releases: currentReleases,
-                featured: currentFeatured,
+                subscriptionReleases: currentReleases,
+                subscriptionFeatured: currentFeatured,
+                localReleases: localReleases,
                 timestamp: new Date().toISOString(),
               });
+              
+              // Trigger incremental federation if new content is detected
+              const lastKnownCount = (lensService as any).lastKnownCounts?.[siteId] || 0;
+              if (currentReleases > lastKnownCount) {
+                logger.info('New content detected, triggering incremental federation', {
+                  siteId,
+                  previousCount: lastKnownCount,
+                  currentCount: currentReleases,
+                  newItems: currentReleases - lastKnownCount,
+                });
+                
+                // Store the updated count
+                if (!(lensService as any).lastKnownCounts) {
+                  (lensService as any).lastKnownCounts = {};
+                }
+                (lensService as any).lastKnownCounts[siteId] = currentReleases;
+              }
+              
             } catch (monitorError) {
               logger.debug('Error monitoring subscription sync', {
                 siteId,
                 error: monitorError instanceof Error ? monitorError.message : monitorError,
               });
             }
-          }, 120000); // Check every 2 minutes
+          }, 300000); // Check every 5 minutes for large collections
           
           // Set up cleanup for this subscription monitoring
           process.on('SIGINT', () => {
