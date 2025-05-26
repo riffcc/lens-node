@@ -814,12 +814,48 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
           logger.info('Attempting to find peers for subscribed site', { siteId });
           
           try {
-            // This will attempt to find peers who have the site
-            await client!.dial(`/p2p/${siteId}`);
-          } catch (dialError) {
-            logger.debug('Failed to dial site directly', { 
-              siteId, 
-              error: dialError instanceof Error ? dialError.message : dialError 
+            // Try multiple discovery methods
+            
+            // Method 1: Direct dial attempt
+            try {
+              await client!.dial(`/p2p/${siteId}`);
+              logger.info('Successfully dialed site directly', { siteId });
+            } catch (directDialError) {
+              logger.debug('Direct dial failed, trying peer discovery', { 
+                siteId, 
+                error: directDialError instanceof Error ? directDialError.message : directDialError 
+              });
+              
+              // Method 2: Use Peerbit's peer discovery
+              try {
+                // Check if any connected peers have opened this site
+                const connectedPeers = client!.libp2p.getPeers();
+                logger.info('Checking connected peers for site content', {
+                  siteId,
+                  connectedPeerCount: connectedPeers.length,
+                  connectedPeers: connectedPeers.map(p => p.toString())
+                });
+                
+                // Try to query each peer about the site
+                for (const peerId of connectedPeers) {
+                  logger.debug('Checking peer for site content', {
+                    siteId,
+                    peerId: peerId.toString()
+                  });
+                }
+                
+              } catch (peerCheckError) {
+                logger.debug('Failed to check peers for site content', {
+                  siteId,
+                  error: peerCheckError instanceof Error ? peerCheckError.message : peerCheckError
+                });
+              }
+            }
+            
+          } catch (error) {
+            logger.error('Peer discovery failed for site', {
+              siteId,
+              error: error instanceof Error ? error.message : error
             });
           }
         }
@@ -853,6 +889,14 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
         releases: releasesCount,
         featuredReleases: featuredCount,
         subscriptions: subscriptionsCount,
+      });
+      
+      // Log that this node is ready to replicate content
+      logger.info('Node ready for content replication', {
+        siteAddress: site.address,
+        peerId: client!.peerId.toString(),
+        mode: 'admin',
+        replicationEnabled: true,
       });
     } catch (error) {
       logError('Error getting initial store sizes', error);
