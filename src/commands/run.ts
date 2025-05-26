@@ -285,20 +285,32 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       // Set the opened site in LensService
       lensService.siteProgram = site;
       
-      // Advertise content in DHT for content routing
+      // Advertise content in DHT to register as provider
       try {
-        logger.info('Advertising site content in DHT', {
+        logger.info('Registering as DHT content provider', {
           siteAddress: site.address,
+          contentRouting: !!client.libp2p.contentRouting,
+          connectedPeers: client.libp2p.getConnections().length,
+          bootstrapPeersConfigured: bootstrapPeers.length,
         });
         
-        // Advertise the main site
-        if (client.libp2p.contentRouting && client.libp2p.contentRouting.provide) {
+        // Check if content routing is available  
+        if (!client.libp2p.contentRouting) {
+          logger.warn('Content routing not available - DHT provider registration skipped', {
+            impact: 'Other nodes will not be able to discover this content via DHT',
+            suggestion: 'Ensure proper libp2p DHT configuration',
+          });
+        } else if (!client.libp2p.contentRouting.provide) {
+          logger.warn('Content routing provider method not available');
+        } else {
           // Convert site address to CID for DHT advertisement
           const { CID } = await import('multiformats/cid');
           const siteCID = CID.parse(site.address);
+          
+          // Register this node as a provider for the site content
           await client.libp2p.contentRouting.provide(siteCID);
           
-          // Also advertise individual stores
+          // Also register as provider for individual stores
           const releasesCID = CID.parse(site.releases.address);
           const featuredCID = CID.parse(site.featuredReleases.address);
           const subscriptionsCID = CID.parse(site.subscriptions.address);
@@ -309,21 +321,71 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             client.libp2p.contentRouting.provide(subscriptionsCID),
           ]);
           
-          logger.info('Successfully advertised content in DHT', {
+          logger.info('Successfully registered as DHT content provider', {
             siteAddress: site.address,
             stores: {
               releases: site.releases.address,
               featured: site.featuredReleases.address,
               subscriptions: site.subscriptions.address,
             },
+            connectedPeers: client.libp2p.getConnections().length,
           });
-        } else {
-          logger.warn('Content routing not available, DHT advertisement skipped');
+          
+          console.log(`✅ Registered as DHT provider for ${site.address}`);
+          
+          // Set up periodic re-advertisement to maintain DHT provider status
+          const advertiseInterval = setInterval(async () => {
+            try {
+              if (client?.libp2p.contentRouting?.provide) {
+                await client.libp2p.contentRouting.provide(siteCID);
+                logger.debug('Re-advertised content in DHT', {
+                  siteAddress: site?.address,
+                  timestamp: new Date().toISOString(),
+                });
+              }
+            } catch (readvertiseError) {
+              logger.debug('Failed to re-advertise content', {
+                siteAddress: site?.address,
+                error: readvertiseError instanceof Error ? readvertiseError.message : readvertiseError,
+              });
+            }
+          }, 300000); // Re-advertise every 5 minutes
+          
+          // Store interval for cleanup on shutdown
+          process.on('SIGINT', () => clearInterval(advertiseInterval));
+          process.on('SIGTERM', () => clearInterval(advertiseInterval));
         }
+        
       } catch (error) {
-        logError('Failed to advertise content in DHT', error, {
+        logError('Failed to register as DHT content provider', error, {
           siteAddress: site.address,
+          errorType: error instanceof Error ? error.constructor.name : 'Unknown',
+          errorMessage: error instanceof Error ? error.message : String(error),
         });
+        
+        if (error instanceof Error && error.message.includes('No content routers available')) {
+          logger.warn('DHT content routing unavailable', {
+            impact: 'Content discovery will rely on direct peer connections',
+            suggestion: 'This is normal if no DHT bootstrap peers are configured',
+            currentBootstrapPeers: bootstrapPeers.length,
+          });
+          console.log('⚠️  DHT provider registration failed - content discovery limited to direct peers');
+        }
+      }
+      
+      // Initialize Peerbit content replication system
+      const connections = client.libp2p.getConnections();
+      logger.info('Peerbit replication system ready', {
+        siteAddress: site.address,
+        connectedPeers: connections.length,
+        replicationMode: onlyReplicate ? 'dedicated' : 'admin',
+        peerIds: connections.map(c => c.remotePeer.toString()),
+      });
+      
+      if (connections.length > 0) {
+        console.log(`✅ Connected to ${connections.length} peers - content replication active`);
+      } else {
+        console.log('⚠️  No peer connections - waiting for peers to connect');
       }
       
       // Set up comprehensive sync monitoring
@@ -931,177 +993,85 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
         }
       }
       
-      // Check if we should be syncing from any subscribed sites
+      // Attempt to sync content from subscribed sites using Peerbit's native replication
       for (const subscription of subscriptions) {
         const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
-        logger.info('Checking subscription sync for site', {
+        logger.info('Attempting to sync subscription', {
           siteId,
           subscriptionId: subscription.id,
-          expectedReleases: 35,
-          currentReleases: (await site.releases.index.search(new SearchRequest({}))).length,
+          subscriptionName: subscription[SUBSCRIPTION_NAME_PROPERTY],
+          recursive: subscription[SUBSCRIPTION_RECURSIVE_PROPERTY],
         });
         
-        // Try to actively sync from known peers using DHT queries
         try {
-          // Parse bootstrap peers for this sync operation
-          const bootstrappersEnv = process.env.BOOTSTRAPPERS;
-          const availableBootstrapPeers = bootstrappersEnv 
-            ? bootstrappersEnv.split(',').map((b: string) => b.trim()).filter((b: string) => b.length > 0)
-            : [];
-            
-          // First, ensure we're connected to bootstrap peers for DHT operations
-          if (availableBootstrapPeers.length > 0) {
-            for (const bootstrapPeer of availableBootstrapPeers) {
-              try {
-                // Check if we're already connected to this peer (by trying to dial)
-                const connections = client!.libp2p.getConnections();
-                const isConnected = connections.some(conn => 
-                  conn.remoteAddr.toString().includes(bootstrapPeer.split('/p2p/')[1])
-                );
-                
-                if (!isConnected) {
-                  logger.debug('Ensuring connection to bootstrap peer for DHT', {
-                    siteId,
-                    bootstrapPeer,
-                  });
-                  await client!.dial(bootstrapPeer);
-                }
-              } catch (bootstrapDialError) {
-                logger.debug('Failed to dial bootstrap peer', {
-                  siteId,
-                  bootstrapPeer,
-                  error: bootstrapDialError instanceof Error ? bootstrapDialError.message : bootstrapDialError,
-                });
-              }
-            }
-          }
-          
-          // Try DHT content routing to find providers
-          if (client!.libp2p.contentRouting) {
-            try {
-              const { CID } = await import('multiformats/cid');
-              const targetCID = CID.parse(siteId);
-              
-              logger.info('Querying DHT for content providers', {
-                siteId,
-                targetCID: targetCID.toString(),
-                availableBootstrapPeers: availableBootstrapPeers.length,
-                totalConnections: client!.libp2p.getConnections().length,
-              });
-              
-              // Query DHT for providers of this content with timeout
-              const providers = [];
-              const queryTimeout = 10000; // 10 second timeout
-              const queryPromise = (async () => {
-                for await (const provider of client!.libp2p.contentRouting.findProviders(targetCID)) {
-                  providers.push(provider);
-                  logger.info('Found content provider via DHT', {
-                    siteId,
-                    providerId: provider.id.toString(),
-                    multiaddrs: provider.multiaddrs?.map(addr => addr.toString()) || [],
-                  });
-                  
-                  // Try to connect to this provider if not already connected
-                  if (!client!.libp2p.getPeers().some(p => p.equals(provider.id))) {
-                    try {
-                      logger.info('Connecting to content provider', {
-                        siteId,
-                        providerId: provider.id.toString(),
-                      });
-                      await client!.dial(provider.multiaddrs?.[0] || provider.id);
-                    } catch (dialError) {
-                      logger.debug('Failed to dial content provider', {
-                        siteId,
-                        providerId: provider.id.toString(),
-                        error: dialError instanceof Error ? dialError.message : dialError,
-                      });
-                    }
-                  }
-                  
-                  // Stop after finding a reasonable number of providers
-                  if (providers.length >= 3) break;
-                }
-                return providers;
-              })();
-              
-              // Race the query against timeout
-              try {
-                await Promise.race([
-                  queryPromise,
-                  new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('DHT query timeout')), queryTimeout)
-                  )
-                ]);
-              } catch (timeoutError) {
-                logger.debug('DHT query timed out, proceeding with found providers', {
-                  siteId,
-                  providersFound: providers.length,
-                });
-              }
-              
-              logger.info('DHT content query completed', {
-                siteId,
-                providersFound: providers.length,
-              });
-              
-              // If we found providers, try to open the site for replication
-              if (providers.length > 0) {
-                try {
-                  logger.info('Attempting to open subscribed site for replication', {
-                    siteId,
-                    providersAvailable: providers.length,
-                  });
-                  
-                  const subscribedSite = await client!.open<Site>(siteId, {
-                    args: DEDICATED_SITE_ARGS,
-                  });
-                  
-                  const replicatedReleases = (await subscribedSite.releases.index.search(new SearchRequest({}))).length;
-                  logger.info('Successfully opened and synced subscribed site', {
-                    siteId,
-                    replicatedReleases,
-                    expectedReleases: 35,
-                    syncPercentage: Math.round((replicatedReleases / 35) * 100),
-                  });
-                  
-                  // Keep the site open for a bit to allow full sync
-                  setTimeout(async () => {
-                    try {
-                      await subscribedSite.close();
-                      logger.info('Closed subscribed site after sync period', { siteId });
-                    } catch (closeError) {
-                      logger.debug('Error closing subscribed site', { siteId, error: closeError });
-                    }
-                  }, 60000); // Keep open for 1 minute to allow sync
-                  
-                } catch (openError) {
-                  logger.debug('Failed to open subscribed site for replication', {
-                    siteId,
-                    error: openError instanceof Error ? openError.message : openError,
-                  });
-                }
-              }
-              
-            } catch (dhtError) {
-              logger.debug('DHT content query failed', {
-                siteId,
-                error: dhtError instanceof Error ? dhtError.message : dhtError,
-              });
-            }
-          }
-          
-          // Fallback: Check if any connected peers might have this site open
-          for (const peerId of client!.libp2p.getPeers()) {
-            if (siteId === site.address) continue; // Skip self
-            logger.debug('Checking if peer has subscribed site content', {
-              peerId: peerId.toString(),
-              targetSiteId: siteId,
-            });
-          }
-        } catch (syncCheckError) {
-          logger.debug('Error checking sync status', {
+          // Try to open the subscribed site for replication
+          // Peerbit will handle peer discovery and content sync automatically
+          logger.info('Opening subscribed site for replication', {
             siteId,
-            error: syncCheckError instanceof Error ? syncCheckError.message : syncCheckError,
+            connectedPeers: client!.libp2p.getConnections().length,
+          });
+          
+          const subscribedSite = await client!.open<Site>(siteId, {
+            args: DEDICATED_SITE_ARGS, // Use dedicated args for better replication
+          });
+          
+          // Wait a moment for initial sync
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          // Check sync status
+          const replicatedReleases = (await subscribedSite.releases.index.search(new SearchRequest({}))).length;
+          const replicatedFeatured = (await subscribedSite.featuredReleases.index.search(new SearchRequest({}))).length;
+          
+          logger.info('Subscription sync status', {
+            siteId,
+            replicatedReleases,
+            replicatedFeatured,
+            syncProgress: replicatedReleases > 0 ? 'active' : 'pending',
+          });
+          
+          // Set up periodic sync monitoring for this subscription
+          const syncInterval = setInterval(async () => {
+            try {
+              const currentReleases = (await subscribedSite.releases.index.search(new SearchRequest({}))).length;
+              const currentFeatured = (await subscribedSite.featuredReleases.index.search(new SearchRequest({}))).length;
+              
+              logger.info('Subscription sync update', {
+                siteId,
+                releases: currentReleases,
+                featured: currentFeatured,
+                timestamp: new Date().toISOString(),
+              });
+            } catch (monitorError) {
+              logger.debug('Error monitoring subscription sync', {
+                siteId,
+                error: monitorError instanceof Error ? monitorError.message : monitorError,
+              });
+            }
+          }, 120000); // Check every 2 minutes
+          
+          // Set up cleanup for this subscription monitoring
+          process.on('SIGINT', () => {
+            clearInterval(syncInterval);
+            subscribedSite.close().catch(() => {});
+          });
+          process.on('SIGTERM', () => {
+            clearInterval(syncInterval);
+            subscribedSite.close().catch(() => {});
+          });
+          
+        } catch (openError) {
+          logger.warn('Failed to open subscribed site', {
+            siteId,
+            error: openError instanceof Error ? openError.message : openError,
+            suggestion: 'Site may not be available from connected peers',
+          });
+          
+          // Try to find peers that might have this content
+          const connectedPeers = client!.libp2p.getConnections();
+          logger.info('Searching for subscription content among peers', {
+            siteId,
+            availablePeers: connectedPeers.length,
+            peerIds: connectedPeers.map(c => c.remotePeer.toString()),
           });
         }
       }

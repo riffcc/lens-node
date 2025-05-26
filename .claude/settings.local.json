@@ -6,7 +6,8 @@
       "Bash(npm test:*)",
       "Bash(ls:*)",
       "Bash(pnpm test:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": []
   }
