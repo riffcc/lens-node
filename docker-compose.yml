@@ -1,6 +1,6 @@
 services:
   lens-node:
-    image: zorlin/riffcc-lens-node:0.1.9
+    image: zorlin/riffcc-lens-node:0.1.15
     command: ["run"]
     container_name: riffcc-lens-node
     restart: unless-stopped
