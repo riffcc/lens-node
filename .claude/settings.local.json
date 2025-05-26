@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm install:*)",
+      "Bash(npx jest:*)",
+      "Bash(npm test:*)",
+      "Bash(ls:*)",
+      "Bash(pnpm test:*)",
+      "Bash(node:*)"
+    ],
+    "deny": []
+  }
+}
