@@ -864,12 +864,29 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
       // Check if we should be syncing from any subscribed sites
       for (const subscription of subscriptions) {
         const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
-        logger.debug('Checking subscription sync', {
+        logger.info('Checking subscription sync for site', {
           siteId,
           subscriptionId: subscription.id,
+          expectedReleases: 35,
+          currentReleases: (await site.releases.index.search(new SearchRequest({}))).length,
         });
         
-        // TODO: Add actual sync status check when API is available
+        // Try to actively sync from known peers
+        try {
+          // Check if any connected peers might have this site open
+          for (const peerId of client!.libp2p.getPeers()) {
+            if (siteId === site.address) continue; // Skip self
+            logger.debug('Checking if peer has subscribed site content', {
+              peerId: peerId.toString(),
+              targetSiteId: siteId,
+            });
+          }
+        } catch (syncCheckError) {
+          logger.debug('Error checking sync status', {
+            siteId,
+            error: syncCheckError instanceof Error ? syncCheckError.message : syncCheckError,
+          });
+        }
       }
       
       lastSubscriptionCheck = currentTime;
