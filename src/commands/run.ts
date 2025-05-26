@@ -13,10 +13,13 @@ import {
   SUBSCRIPTION_SITE_ID_PROPERTY,
   SUBSCRIPTION_NAME_PROPERTY,
   SUBSCRIPTION_RECURSIVE_PROPERTY,
+  ID_PROPERTY,
 } from '@riffcc/lens-sdk';
+import { SearchRequest } from '@peerbit/document';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
 import { dirOption } from './commonOptions.js';
+import { logger, logSubscriptionEvent, logSyncEvent, logPeerEvent, logError } from '../logger.js';
 
 
 type RunCommandArgs = {
@@ -61,13 +64,24 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       if (isShuttingDown) return;
       isShuttingDown = true;
 
+      logger.info('Shutdown initiated', { signal });
       console.log(`\nReceived ${signal}. Shutting down gracefully...`);
 
       try {
-        if (site) await site.close();
-        if (client) await client.stop();
+        if (site) {
+          logger.info('Closing site');
+          await site.close();
+          logger.info('Site closed successfully');
+        }
+        if (client) {
+          logger.info('Stopping Peerbit client');
+          await client.stop();
+          logger.info('Peerbit client stopped successfully');
+        }
+        logger.info('Cleanup finished successfully');
         console.log('Cleanup finished.');
       } catch (error) {
+        logError('Error during shutdown', error);
         console.error('Error during shutdown:', (error as Error).message);
       } finally {
         process.exit(0);
@@ -89,6 +103,16 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       const { dir, onlyReplicate } = argv;
       const siteAddress = process.env.SITE_ADDRESS;
       const bootstrappers = process.env.BOOTSTRAPPERS;
+      
+      logger.info('Starting Lens Node', {
+        directory: dir,
+        onlyReplicate,
+        siteAddress,
+        bootstrappers: bootstrappers?.split(',').map(b => b.trim()),
+        nodeVersion: process.version,
+        platform: process.platform,
+        pid: process.pid,
+      });
 
       // Read configuration
       if (siteAddress && onlyReplicate) {
@@ -122,26 +146,86 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       };
 
       // Initialize Peerbit client
+      logger.info('Initializing Peerbit client', {
+        directory: dir,
+        relay: argv.relay,
+        libp2pConfig: JSON.stringify(libp2pConfig, null, 2),
+      });
+      
       client = await Peerbit.create({
         directory: dir,
         relay: argv.relay,
         libp2p: libp2pConfig,
       });
+      
+      logger.info('Peerbit client created successfully', {
+        peerId: client.peerId.toString(),
+        multiaddrs: client.getMultiaddrs().map(m => m.toString()),
+      });
+      
+      // Add peer connection event listeners
+      client.libp2p.addEventListener('peer:connect', (evt) => {
+        logPeerEvent('peer:connect', { peerId: evt.detail.toString() });
+      });
+      
+      client.libp2p.addEventListener('peer:disconnect', (evt) => {
+        logPeerEvent('peer:disconnect', { peerId: evt.detail.toString() });
+      });
 
       if (bootstrappers) {
+        const bootstrappersList = bootstrappers.split(',').map(b => b.trim());
+        logger.info('Dialing bootstrappers', { 
+          bootstrappers: bootstrappersList,
+          count: bootstrappersList.length,
+        });
         console.log('Dialing bootstrappers...');
-        const promises = bootstrappers
-          .split(',')
-          .map((b) => client?.dial(b.trim()));
+        
+        const promises = bootstrappersList.map((b) => client?.dial(b));
         const dialingResult = await Promise.allSettled(promises);
+        
+        const successful = dialingResult.filter(x => x.status === 'fulfilled').length;
+        const failed = dialingResult.filter(x => x.status === 'rejected');
+        
+        logger.info('Bootstrapper dialing complete', {
+          successful,
+          failed: failed.length,
+          total: dialingResult.length,
+          failures: failed.map((f, i) => ({ 
+            bootstrapper: bootstrappersList[i],
+            error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
+          })),
+        });
         console.log(`
-          ${dialingResult.filter(x => x.status === 'fulfilled').length}/${dialingResult.length}bootstrappers addresses were dialed successfuly.
+          ${successful}/${dialingResult.length}bootstrappers addresses were dialed successfuly.
         `);
       }
 
       // Initialize LensService
+      logger.info('Initializing LensService');
       lensService = new LensService(client);
       
+      // Add peer connection listeners
+      client.libp2p.addEventListener('peer:connect', (evt) => {
+        logPeerEvent('peer:connect', {
+          peerId: evt.detail.toString(),
+          connections: client!.libp2p.getConnections().length,
+        });
+      });
+      
+      client.libp2p.addEventListener('peer:disconnect', (evt) => {
+        logPeerEvent('peer:disconnect', {
+          peerId: evt.detail.toString(),
+          remainingConnections: client!.libp2p.getConnections().length,
+        });
+      });
+      
+      logger.info('Opening site', {
+        address: siteConfig.address,
+        mode: onlyReplicate ? 'dedicated/replicate' : 'admin',
+        args: onlyReplicate ? DEDICATED_SITE_ARGS : ADMIN_SITE_ARGS,
+      });
+      
+      const siteOpenStart = Date.now();
       site = await client.open<Site>(
         siteConfig.address,
         {
@@ -149,8 +233,113 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         }
       );
       
+      const siteOpenDuration = Date.now() - siteOpenStart;
+      logger.info('Site opened successfully', {
+        address: site.address,
+        duration: siteOpenDuration,
+        durationSeconds: (siteOpenDuration / 1000).toFixed(2),
+      });
+      
+      // Log site stores information
+      logger.info('Site stores initialized', {
+        releases: {
+          address: site.releases.address,
+        },
+        featuredReleases: {
+          address: site.featuredReleases.address,
+        },
+        subscriptions: {
+          address: site.subscriptions.address,
+        },
+      });
+      
       // Set the opened site in LensService
       lensService.siteProgram = site;
+      
+      // Set up comprehensive sync monitoring
+      setupSyncMonitoring(site, lensService);
+      logger.info('LensService configured with site program');
+      
+      // Monitor when new releases are added
+      
+      // Monitor when new releases are added
+      site!.releases.events.addEventListener('change', (evt) => {
+        logSyncEvent('releases:change', {
+          added: evt.detail.added?.length || 0,
+          removed: evt.detail.removed?.length || 0,
+          addedIds: evt.detail.added?.map((doc: any) => doc[ID_PROPERTY]),
+          removedIds: evt.detail.removed?.map((doc: any) => doc[ID_PROPERTY]),
+        });
+      });
+      
+      // Monitor subscription changes
+      site.subscriptions.events.addEventListener('change', (evt) => {
+        logSubscriptionEvent('subscription:change', {
+          added: evt.detail.added?.length || 0,
+          removed: evt.detail.removed?.length || 0,
+          addedSites: evt.detail.added?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
+          removedSites: evt.detail.removed?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
+        });
+      });
+      
+      // Monitor featured releases changes
+      site.featuredReleases.events.addEventListener('change', (evt) => {
+        logSyncEvent('featuredReleases:change', {
+          added: evt.detail.added?.length || 0,
+          removed: evt.detail.removed?.length || 0,
+        });
+      });
+      
+      // Monitor replication for all stores
+      const stores = ['releases', 'featuredReleases', 'subscriptions'];
+      stores.forEach(storeName => {
+        const store = site![storeName as keyof Site] as any;
+        if (store?.events) {
+          store.events.addEventListener('peer:replicating', (evt: any) => {
+            logSyncEvent(`${storeName}:peer:replicating`, {
+              remotePeer: evt.detail.remotePeer?.toString(),
+              direction: evt.detail.direction,
+            });
+          });
+          
+          store.events.addEventListener('replicate', (evt: any) => {
+            logSyncEvent(`${storeName}:replicate`, {
+              heads: evt.detail.heads?.length || 0,
+              amount: evt.detail.amount,
+            });
+          });
+        }
+      });
+      
+      // Log initial subscription state
+      try {
+        const initialSubs = await lensService.getSubscriptions();
+        logger.info('Initial subscriptions loaded', {
+          count: initialSubs.length,
+          subscriptions: initialSubs.map(sub => ({
+            siteId: sub[SUBSCRIPTION_SITE_ID_PROPERTY],
+            name: sub[SUBSCRIPTION_NAME_PROPERTY],
+            recursive: sub[SUBSCRIPTION_RECURSIVE_PROPERTY],
+          })),
+        });
+      } catch (error) {
+        logError('Failed to load initial subscriptions', error);
+      }
+      
+      // Log initial store sizes
+      try {
+        const releaseCount = (await site.releases.index.search(new SearchRequest({}))).length;
+        const featuredCount = (await site.featuredReleases.index.search(new SearchRequest({}))).length;
+        const subscriptionCount = (await site.subscriptions.index.search(new SearchRequest({}))).length;
+        
+        logger.info('Initial store sizes', {
+          releases: releaseCount,
+          featuredReleases: featuredCount,
+          subscriptions: subscriptionCount,
+        });
+      } catch (error) {
+        logError('Failed to get initial store sizes', error);
+      }
 
       logOperationSuccess({
         startMessage: 'Lens Node is running. Press Ctrl+C to stop OR use the menu below.',
@@ -160,7 +349,62 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         siteAddress: site.address,
         listeningOn: client.getMultiaddrs().map(m => m.toString()),
       });
+      
+      logger.info('Lens Node fully initialized', {
+        mode: onlyReplicate ? 'replication-only' : 'admin',
+        siteAddress: site.address,
+        peerId: client.peerId.toString(),
+        connections: client.libp2p.getConnections().length,
+      });
 
+      // Start periodic sync status logging
+      if (onlyReplicate) {
+        logger.info('Running in replication-only mode, starting periodic status logging');
+        const statusInterval = setInterval(async () => {
+          try {
+            const connections = client!.libp2p.getConnections();
+            const subscriptions = await lensService!.getSubscriptions();
+            
+            // Get release counts for each store
+            const releaseCount = (await site!.releases.index.search(new SearchRequest({}))).length;
+            const featuredCount = (await site!.featuredReleases.index.search(new SearchRequest({}))).length;
+            const subscriptionCount = (await site!.subscriptions.index.search(new SearchRequest({}))).length;
+            
+            logger.info('Replication status', {
+              connections: connections.length,
+              connectedPeers: connections.map(c => c.remotePeer.toString()),
+              subscriptions: subscriptions.length,
+              stores: {
+                releases: releaseCount,
+                featured: featuredCount,
+                subscriptions: subscriptionCount,
+              },
+              uptime: process.uptime(),
+              memoryUsage: process.memoryUsage(),
+            });
+            
+            // Check sync status for each subscription
+            for (const sub of subscriptions) {
+              const siteId = sub[SUBSCRIPTION_SITE_ID_PROPERTY];
+              try {
+                logger.debug('Checking subscription sync status', {
+                  siteId,
+                  name: sub[SUBSCRIPTION_NAME_PROPERTY],
+                });
+              } catch (subError) {
+                logError('Error checking subscription status', subError, { siteId });
+              }
+            }
+          } catch (error) {
+            logError('Error logging replication status', error);
+          }
+        }, 60000); // Log every minute
+        
+        // Clear interval on shutdown
+        process.on('SIGINT', () => clearInterval(statusInterval));
+        process.on('SIGTERM', () => clearInterval(statusInterval));
+      }
+      
       // Menu loop
       if (!onlyReplicate) {
         while (!isShuttingDown) {
@@ -210,9 +454,21 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
                 });
 
                 try {
+                  logger.info('Authorizing account', {
+                    publicKey: stringPubkicKey,
+                    accountType: accountType === 1 ? 'Member' : 'Admin',
+                  });
                   await authorise(site, accountType, stringPubkicKey);
+                  logger.info('Account authorized successfully', {
+                    publicKey: stringPubkicKey,
+                    accountType: accountType === 1 ? 'Member' : 'Admin',
+                  });
                   console.log('Account authorized successfully.');
                 } catch (error) {
+                  logError('Error authorizing account', error, {
+                    publicKey: stringPubkicKey,
+                    accountType,
+                  });
                   console.error(`Error on authorizing account: ${(error as Error).message}`);
                 }
                 break;
@@ -237,6 +493,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       }
 
     } catch (error) {
+      logError('Fatal error in run command', error);
       console.error('Fatal error:', (error as Error).message);
       await shutdown('fatal_error');
     }
@@ -275,7 +532,12 @@ async function handleSubscriptionMenu(lensService: LensService) {
 
 async function viewSubscriptions(lensService: LensService) {
   try {
+    logger.info('Fetching current subscriptions');
     const subscriptions = await lensService.getSubscriptions();
+    
+    logSubscriptionEvent('subscriptions:viewed', {
+      count: subscriptions.length,
+    });
     
     if (subscriptions.length === 0) {
       console.log('\nNo subscriptions found.\n');
@@ -343,13 +605,60 @@ async function subscribeSite(lensService: LensService) {
       followChain: [],
     };
 
+    logSubscriptionEvent('subscription:add:start', subscriptionData);
     const result = await lensService.addSubscription(subscriptionData);
 
     if (result.success) {
+      logSubscriptionEvent('subscription:add:success', {
+        ...subscriptionData,
+        id: result.id,
+        hash: result.hash,
+      });
       console.log('\n✅ Successfully subscribed to site!');
       console.log(`   Subscription ID: ${result.id}`);
       console.log(`   Hash: ${result.hash}\n`);
+      
+      // Trigger immediate sync check
+      logger.info('Triggering sync check for new subscription', {
+        siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+      });
+      
+      // Attempt to open the subscribed site to trigger sync
+      try {
+        logger.info('Attempting to open subscribed site for sync', {
+          siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+        });
+        const subscribedSite = await lensService!.client!.open<Site>(
+          subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+          {
+            args: DEDICATED_SITE_ARGS,
+          }
+        );
+        
+        logger.info('Subscribed site opened, checking releases', {
+          siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+          address: subscribedSite.address,
+        });
+        
+        // Check how many releases exist in the subscribed site
+        const releaseCount = (await subscribedSite.releases.index.search(new SearchRequest({}))).length;
+        logger.info('Subscribed site release count', {
+          siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+          releaseCount,
+        });
+        
+        // Close the subscribed site as we only needed to trigger sync
+        await subscribedSite.close();
+        logger.info('Closed subscribed site after sync check', {
+          siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+        });
+      } catch (syncError) {
+        logError('Failed to open subscribed site for sync', syncError, {
+          siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
+        });
+      }
     } else {
+      logError('Failed to add subscription', new Error(result.error || 'Unknown error'), subscriptionData);
       console.error(`\n❌ Failed to subscribe: ${result.error}\n`);
     }
   } catch (error) {
@@ -402,16 +711,117 @@ async function unsubscribeSite(lensService: LensService) {
       return;
     }
 
+    const subToDelete = subscriptions.find(s => s.id === subscriptionId);
+    logSubscriptionEvent('subscription:delete:start', {
+      id: subscriptionId,
+      siteId: subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY],
+    });
+    
     const result = await lensService.deleteSubscription({ id: subscriptionId });
 
     if (result.success) {
+      logSubscriptionEvent('subscription:delete:success', {
+        id: subscriptionId,
+        siteId: subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY],
+      });
       console.log('\n✅ Successfully unsubscribed!\n');
     } else {
+      logError('Failed to delete subscription', new Error(result.error || 'Unknown error'), {
+        id: subscriptionId,
+      });
       console.error(`\n❌ Failed to unsubscribe: ${result.error}\n`);
     }
   } catch (error) {
     console.error('Error unsubscribing:', (error as Error).message);
   }
+}
+
+// Set up comprehensive monitoring for sync events
+function setupSyncMonitoring(site: Site, lensService: LensService) {
+  logger.info('Setting up sync monitoring');
+  
+  // Monitor releases store events
+  site.releases.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('releases:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Monitor releases store sync events
+  // Note: Specific replication events may not be available in current version
+  
+  // Monitor featured releases store events
+  site.featuredReleases.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('featuredReleases:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Monitor featured releases store sync events
+  // Note: Specific replication events may not be available in current version
+  
+  // Monitor subscriptions store events
+  site.subscriptions.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('subscriptions:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Periodic subscription sync status logging
+  let lastSubscriptionCheck = Date.now();
+  setInterval(async () => {
+    try {
+      const subscriptions = await lensService.getSubscriptions();
+      const currentTime = Date.now();
+      const timeSinceLastCheck = currentTime - lastSubscriptionCheck;
+      
+      logger.info('Subscription sync status check', {
+        subscriptionCount: subscriptions.length,
+        timeSinceLastCheck: timeSinceLastCheck,
+        subscriptions: subscriptions.map(sub => ({
+          siteId: sub[SUBSCRIPTION_SITE_ID_PROPERTY],
+          name: sub[SUBSCRIPTION_NAME_PROPERTY],
+          recursive: sub[SUBSCRIPTION_RECURSIVE_PROPERTY],
+          type: sub.subscriptionType,
+        })),
+      });
+      
+      // Check if we should be syncing from any subscribed sites
+      for (const subscription of subscriptions) {
+        const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
+        logger.debug('Checking subscription sync', {
+          siteId,
+          subscriptionId: subscription.id,
+        });
+        
+        // TODO: Add actual sync status check when API is available
+      }
+      
+      lastSubscriptionCheck = currentTime;
+    } catch (error) {
+      logError('Error checking subscription sync status', error);
+    }
+  }, 30000); // Check every 30 seconds
+  
+  // Log initial store sizes
+  setTimeout(async () => {
+    try {
+      const releasesCount = (await site.releases.index.search(new SearchRequest({}))).length;
+      const featuredCount = (await site.featuredReleases.index.search(new SearchRequest({}))).length;
+      const subscriptionsCount = (await site.subscriptions.index.search(new SearchRequest({}))).length;
+      
+      logger.info('Initial store sizes', {
+        releases: releasesCount,
+        featuredReleases: featuredCount,
+        subscriptions: subscriptionsCount,
+      });
+    } catch (error) {
+      logError('Error getting initial store sizes', error);
+    }
+  }, 5000); // Wait 5 seconds after startup
 }
 
 export default runCommand;

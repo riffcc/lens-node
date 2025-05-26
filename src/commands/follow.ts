@@ -3,6 +3,7 @@ import { Peerbit } from 'peerbit';
 import { LensService, Site, ADMIN_SITE_ARGS, SUBSCRIPTION_SITE_ID_PROPERTY, SUBSCRIPTION_NAME_PROPERTY, SUBSCRIPTION_RECURSIVE_PROPERTY } from '@riffcc/lens-sdk';
 import { dirOption } from './commonOptions.js';
 import { readConfig } from '../utils.js';
+import { logger, logSubscriptionEvent, logError } from '../logger.js';
 
 interface FollowArguments {
   dir: string;
@@ -27,6 +28,7 @@ export const followCommand: CommandModule<{}, FollowArguments> = {
     const { dir, siteId } = argv;
     
     console.log(`Following site ${siteId}...`);
+    logger.info('Follow command started', { siteId, directory: dir });
     
     let client: Peerbit | undefined;
     let site: Site | undefined;
@@ -40,9 +42,11 @@ export const followCommand: CommandModule<{}, FollowArguments> = {
       }
       
       // Initialize Peerbit client
+      logger.info('Creating Peerbit client for follow command');
       client = await Peerbit.create({
         directory: dir,
       });
+      logger.info('Peerbit client created', { peerId: client.peerId.toString() });
       
       // Initialize LensService
       lensService = new LensService(client);
@@ -69,9 +73,15 @@ export const followCommand: CommandModule<{}, FollowArguments> = {
       };
       
       // Add subscription
+      logSubscriptionEvent('follow:attempt', { siteId: siteId.trim() });
       const result = await lensService.addSubscription(subscriptionData);
       
       if (result.success) {
+        logSubscriptionEvent('follow:success', {
+          siteId: siteId.trim(),
+          subscriptionId: result.id,
+          hash: result.hash,
+        });
         console.log(`✓ Successfully followed site ${siteId}`);
         console.log(`  Subscription ID: ${result.id}`);
         console.log(`  Hash: ${result.hash}`);
@@ -80,6 +90,7 @@ export const followCommand: CommandModule<{}, FollowArguments> = {
       }
       
     } catch (error) {
+      logError('Failed to follow site', error, { siteId });
       console.error('Error following site:', error);
       process.exit(1);
     } finally {

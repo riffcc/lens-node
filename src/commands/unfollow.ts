@@ -3,6 +3,7 @@ import { Peerbit } from 'peerbit';
 import { LensService, Site, ADMIN_SITE_ARGS, SUBSCRIPTION_SITE_ID_PROPERTY } from '@riffcc/lens-sdk';
 import { dirOption } from './commonOptions.js';
 import { readConfig } from '../utils.js';
+import { logger, logSubscriptionEvent, logError } from '../logger.js';
 
 interface UnfollowArguments {
   dir: string;
@@ -27,6 +28,7 @@ export const unfollowCommand: CommandModule<{}, UnfollowArguments> = {
     const { dir, siteId } = argv;
     
     console.log(`Unfollowing site ${siteId}...`);
+    logger.info('Unfollow command started', { siteId, directory: dir });
     
     let client: Peerbit | undefined;
     let site: Site | undefined;
@@ -40,9 +42,11 @@ export const unfollowCommand: CommandModule<{}, UnfollowArguments> = {
       }
       
       // Initialize Peerbit client
+      logger.info('Creating Peerbit client for unfollow command');
       client = await Peerbit.create({
         directory: dir,
       });
+      logger.info('Peerbit client created', { peerId: client.peerId.toString() });
       
       // Initialize LensService
       lensService = new LensService(client);
@@ -65,19 +69,34 @@ export const unfollowCommand: CommandModule<{}, UnfollowArguments> = {
       );
       
       if (!subscription) {
+        logSubscriptionEvent('unfollow:not_found', { siteId: siteId.trim() });
         throw new Error(`No subscription found for site ${siteId}`);
       }
       
+      logger.info('Found subscription to remove', {
+        siteId: siteId.trim(),
+        subscriptionId: subscription.id,
+      });
+      
       // Remove subscription
+      logSubscriptionEvent('unfollow:attempt', {
+        siteId: siteId.trim(),
+        subscriptionId: subscription.id,
+      });
       const result = await lensService.deleteSubscription({ id: subscription.id });
       
       if (result.success) {
+        logSubscriptionEvent('unfollow:success', {
+          siteId: siteId.trim(),
+          subscriptionId: subscription.id,
+        });
         console.log(`✓ Successfully unfollowed site ${siteId}`);
       } else {
         throw new Error(result.error || 'Failed to unfollow site');
       }
       
     } catch (error) {
+      logError('Failed to unfollow site', error, { siteId });
       console.error('Error unfollowing site:', error);
       process.exit(1);
     } finally {

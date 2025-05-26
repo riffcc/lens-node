@@ -1,6 +1,6 @@
 {
   "name": "@riffcc/lens-node",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "A command-line interface for running your Lens node.",
   "repository": {
     "type": "git",
@@ -43,6 +43,8 @@
     "inquirer": "^12.6.1",
     "multiformats": "^13.3.6",
     "peerbit": "^4.1.36",
+    "winston": "^3.17.0",
+    "winston-daily-rotate-file": "^5.0.0",
     "yargs": "^17.7.2"
   },
   "devDependencies": {
