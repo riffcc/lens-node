@@ -740,6 +740,9 @@ async function unsubscribeSite(lensService: LensService) {
 function setupSyncMonitoring(site: Site, lensService: LensService) {
   logger.info('Setting up sync monitoring');
   
+  // Get reference to the client for peer information
+  const client = lensService.client;
+  
   // Monitor releases store events
   site.releases.events.addEventListener('change', (evt: any) => {
     logSyncEvent('releases:change', {
@@ -777,10 +780,19 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
       const subscriptions = await lensService.getSubscriptions();
       const currentTime = Date.now();
       const timeSinceLastCheck = currentTime - lastSubscriptionCheck;
+      const connections = client!.libp2p.getConnections();
+      const peers = client!.libp2p.getPeers();
       
       logger.info('Subscription sync status check', {
         subscriptionCount: subscriptions.length,
         timeSinceLastCheck: timeSinceLastCheck,
+        connectionCount: connections.length,
+        peerCount: peers.length,
+        connectedPeers: connections.map((conn: any) => ({
+          peerId: conn.remotePeer.toString(),
+          status: conn.status,
+          multiaddr: conn.remoteAddr.toString(),
+        })),
         subscriptions: subscriptions.map(sub => ({
           siteId: sub[SUBSCRIPTION_SITE_ID_PROPERTY],
           name: sub[SUBSCRIPTION_NAME_PROPERTY],
@@ -788,6 +800,30 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
           type: sub.subscriptionType,
         })),
       });
+      
+      // If no connections, try to diagnose why
+      if (connections.length === 0) {
+        logger.warn('No peer connections detected', {
+          multiaddrs: client!.getMultiaddrs().map(addr => addr.toString()),
+          peerId: client!.peerId.toString(),
+        });
+        
+        // Try to discover and connect to peers advertising the subscribed sites
+        for (const subscription of subscriptions) {
+          const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
+          logger.info('Attempting to find peers for subscribed site', { siteId });
+          
+          try {
+            // This will attempt to find peers who have the site
+            await client!.dial(`/p2p/${siteId}`);
+          } catch (dialError) {
+            logger.debug('Failed to dial site directly', { 
+              siteId, 
+              error: dialError instanceof Error ? dialError.message : dialError 
+            });
+          }
+        }
+      }
       
       // Check if we should be syncing from any subscribed sites
       for (const subscription of subscriptions) {
