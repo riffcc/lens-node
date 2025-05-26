@@ -18,8 +18,8 @@ importers:
         specifier: ^7.5.1
         version: 7.5.1(@types/node@22.15.18)
       '@riffcc/lens-sdk':
-        specifier: ^0.1.18
-        version: 0.1.18(react-native@0.79.2(@babel/core@7.27.1)(react@19.1.0))
+        specifier: ^0.1.20
+        version: 0.1.20(react-native@0.79.2(@babel/core@7.27.1)(react@19.1.0))
       ajv:
         specifier: ^8.17.1
         version: 8.17.1
@@ -910,8 +910,8 @@ packages:
       '@types/react':
         optional: true
 
-  '@riffcc/lens-sdk@0.1.18':
-    resolution: {integrity: sha512-frzwK4ELXFpAtnJPYPJWDVNZfyErW3aRvpDJiqDTrukHvVLrT0AUqYzfhRLZKn6XzPlBSsR/leSZ9uE4IHx6Lg==}
+  '@riffcc/lens-sdk@0.1.20':
+    resolution: {integrity: sha512-gUJ/w0NFem5TWAT0nJat8/9UPC5JmnaaWS1Fs0dT/xIL0v3CY+JKRSXGtEk3TPPx8A2aEn+kV5gyWW3dZqS48w==}
 
   '@sinclair/typebox@0.27.8':
     resolution: {integrity: sha512-+Fj43pSMwJs4KRrH/938Uf+uAELIgVBmQzg/q1YG10djyfA3TnrU8N8XzqCh/okZdszqBQTZf96idMfE5lnwTA==}
@@ -4059,7 +4059,7 @@ snapshots:
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(react@19.1.0)
 
-  '@riffcc/lens-sdk@0.1.18(react-native@0.79.2(@babel/core@7.27.1)(react@19.1.0))':
+  '@riffcc/lens-sdk@0.1.20(react-native@0.79.2(@babel/core@7.27.1)(react@19.1.0))':
     dependencies:
       '@dao-xyz/borsh': 5.2.3
       '@peerbit/crypto': 2.3.8
