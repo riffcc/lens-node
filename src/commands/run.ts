@@ -94,6 +94,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       // Set up libp2p configuration if domains are provided
       let libp2pConfig: Libp2pCreateOptions | undefined;
       const { domain, listenPort } = argv
+      const bindHost = onlyReplicate ? '0.0.0.0' : '127.0.0.1';
       libp2pConfig = {
         addresses: {
           announce: domain ?
@@ -103,8 +104,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             ] :
             undefined,
           listen: [
-            `/ip4/127.0.0.1/tcp/${listenPort}`,
-            `/ip4/127.0.0.1/tcp/${listenPort !== 0 ? listenPort + 1 : listenPort
+            `/ip4/${bindHost}/tcp/${listenPort}`,
+            `/ip4/${bindHost}/tcp/${listenPort !== 0 ? listenPort + 1 : listenPort
             }/ws`,
           ],
         },
