@@ -174,6 +174,12 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         multiaddrs: client.getMultiaddrs().map(m => m.toString()),
       });
       
+      // Debug libp2p services and routing availability
+      logger.info('Libp2p services available', {
+        contentRouting: !!client.libp2p.contentRouting,
+        services: Object.keys(client.libp2p.services || {}),
+      });
+      
       // Add peer connection event listeners
       client.libp2p.addEventListener('peer:connect', (evt) => {
         logPeerEvent('peer:connect', { peerId: evt.detail.toString() });
@@ -298,7 +304,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         if (!client.libp2p.contentRouting) {
           logger.warn('Content routing not available - DHT provider registration skipped', {
             impact: 'Other nodes will not be able to discover this content via DHT',
-            suggestion: 'Ensure proper libp2p DHT configuration',
+            suggestion: 'Content will be available via Peerbit native replication',
           });
         } else if (!client.libp2p.contentRouting.provide) {
           logger.warn('Content routing provider method not available');
