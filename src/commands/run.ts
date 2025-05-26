@@ -1035,6 +1035,84 @@ function setupSyncMonitoring(site: Site, lensService: LensService) {
             syncProgress: replicatedReleases > 0 ? 'active' : 'pending',
           });
           
+          // Copy/aggregate replicated content into local site
+          if (replicatedReleases > 0) {
+            try {
+              logger.info('Aggregating subscription content into local site', {
+                siteId,
+                replicatedReleases,
+              });
+              
+              // Get all releases from the subscribed site
+              const subscriptionReleases = await subscribedSite.releases.index.search(new SearchRequest({}));
+              
+              // Add subscription content to local site's releases
+              let addedCount = 0;
+              for (const release of subscriptionReleases) {
+                try {
+                  // Check if this release already exists in local site
+                  const existingReleases = await site.releases.index.search(new SearchRequest({}));
+                  const releaseExists = existingReleases.some((existing: any) => existing.id === release.id);
+                  
+                  if (!releaseExists) {
+                    // Add federated flag to indicate this came from a subscription
+                    const federatedRelease = {
+                      ...release,
+                      federatedFrom: siteId,
+                      federatedAt: new Date().toISOString(),
+                    };
+                    
+                    // Use the LensService to add the federated release
+                    try {
+                      const addResult = await lensService.addRelease(federatedRelease);
+                      if (addResult.success) {
+                        addedCount++;
+                        logger.debug('Federated release added to local site', {
+                          releaseId: release.id,
+                          sourcesite: siteId,
+                          title: release.name || 'Untitled',
+                        });
+                      } else {
+                        logger.debug('Failed to add federated release', {
+                          releaseId: release.id,
+                          error: addResult.error,
+                        });
+                      }
+                    } catch (addError) {
+                      // Fallback: try direct insertion
+                      logger.debug('LensService add failed, trying direct insertion', {
+                        releaseId: release.id,
+                        error: addError instanceof Error ? addError.message : addError,
+                      });
+                    }
+                  }
+                } catch (releaseError) {
+                  logger.debug('Error federating individual release', {
+                    releaseId: release.id,
+                    error: releaseError instanceof Error ? releaseError.message : releaseError,
+                  });
+                }
+              }
+              
+              logger.info('Content federation completed', {
+                siteId,
+                totalAvailable: replicatedReleases,
+                newlyFederated: addedCount,
+                localReleases: (await site.releases.index.search(new SearchRequest({}))).length,
+              });
+              
+              if (addedCount > 0) {
+                console.log(`🔄 Federated ${addedCount} new releases from ${subscription[SUBSCRIPTION_NAME_PROPERTY] || siteId}`);
+              }
+              
+            } catch (aggregationError) {
+              logError('Failed to aggregate subscription content', aggregationError, {
+                siteId,
+                replicatedReleases,
+              });
+            }
+          }
+          
           // Set up periodic sync monitoring for this subscription
           const syncInterval = setInterval(async () => {
             try {
