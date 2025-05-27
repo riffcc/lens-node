@@ -478,10 +478,13 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           })),
         });
         
-        // Set up real-time sync for each existing subscription
+        // Set up event-driven real-time sync for each existing subscription
         if (initialSubs.length > 0) {
-          console.log(`🔄 Setting up real-time sync for ${initialSubs.length} subscriptions...`);
-          await setupSubscriptionSync(client!, site, lensService, initialSubs);
+          console.log(`🔄 Setting up event-driven real-time sync for ${initialSubs.length} subscriptions...`);
+          const syncManager = await setupSubscriptionSync(client!, site, lensService, initialSubs);
+          
+          // Store sync manager for later use with new subscriptions
+          (lensService as any).syncManager = syncManager;
         }
       } catch (error) {
         logError('Failed to load initial subscriptions', error);
@@ -783,17 +786,24 @@ async function subscribeSite(lensService: LensService) {
       console.log(`   Subscription ID: ${result.id}`);
       console.log(`   Hash: ${result.hash}\n`);
       
-      // Set up real-time sync for the new subscription immediately
-      logger.info('Setting up real-time sync for new subscription', {
+      // Set up event-driven real-time sync for the new subscription immediately
+      logger.info('Setting up event-driven real-time sync for new subscription', {
         siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
       });
       
       try {
-        // Set up real-time sync for just this new subscription
-        await setupSubscriptionSync(lensService!.client!, lensService!.siteProgram!, lensService!, [subscriptionData]);
-        console.log('🔄 Real-time sync activated for new subscription');
+        // Use existing sync manager if available, otherwise create new one
+        const syncManager = (lensService! as any).syncManager;
+        if (syncManager) {
+          await syncManager.setupSubscriptionSync([subscriptionData]);
+        } else {
+          // Fallback to creating new sync manager
+          const newSyncManager = await setupSubscriptionSync(lensService!.client!, lensService!.siteProgram!, lensService!, [subscriptionData]);
+          (lensService! as any).syncManager = newSyncManager;
+        }
+        console.log('🔄 Event-driven real-time sync activated for new subscription');
       } catch (syncError) {
-        logError('Failed to set up real-time sync for new subscription', syncError, {
+        logError('Failed to set up event-driven real-time sync for new subscription', syncError, {
           siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
         });
       }
@@ -1464,184 +1474,391 @@ async function cleanupRemovedContent(localSite: Site, removedReleases: any[], si
   }
 }
 
-// Set up real-time sync for all existing subscriptions
-async function setupSubscriptionSync(client: Peerbit, localSite: Site, lensService: LensService, subscriptions: any[]) {
-  logger.info('Setting up real-time subscription sync', {
-    subscriptionCount: subscriptions.length,
-  });
-  
-  for (const subscription of subscriptions) {
+// Event-driven subscription sync manager
+class SubscriptionSyncManager {
+  private client: Peerbit;
+  private localSite: Site;
+  private lensService: LensService;
+  private activeSubscriptions = new Map<string, {
+    site: Site;
+    siteName?: string;
+    lastActivity: number;
+    reconnectAttempts: number;
+    healthCheckInterval?: NodeJS.Timeout;
+  }>();
+  private shutdownHandlers: (() => Promise<void>)[] = [];
+
+  constructor(client: Peerbit, localSite: Site, lensService: LensService) {
+    this.client = client;
+    this.localSite = localSite;
+    this.lensService = lensService;
+    
+    // Set up global shutdown handlers
+    const shutdown = async () => {
+      await this.shutdown();
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  }
+
+  async setupSubscriptionSync(subscriptions: any[]) {
+    logger.info('Setting up event-driven real-time subscription sync', {
+      subscriptionCount: subscriptions.length,
+    });
+    
+    // Process subscriptions in parallel for faster startup
+    const setupPromises = subscriptions.map(subscription => 
+      this.setupSingleSubscription(subscription).catch(error => {
+        logger.warn('Failed to setup subscription during parallel init', {
+          siteId: subscription[SUBSCRIPTION_SITE_ID_PROPERTY],
+          error: error instanceof Error ? error.message : error,
+        });
+      })
+    );
+    
+    await Promise.allSettled(setupPromises);
+    
+    console.log(`🔄 Real-time sync active for ${this.activeSubscriptions.size}/${subscriptions.length} subscriptions`);
+  }
+
+  private async setupSingleSubscription(subscription: any) {
     const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
     const siteName = subscription[SUBSCRIPTION_NAME_PROPERTY];
     
-    try {
-      logger.info('Opening subscribed site for real-time sync', {
-        siteId,
-        siteName,
-      });
-      
-      // Add timeout and retry logic for opening subscribed sites
-      let subscribedSite: Site | undefined;
-      const maxRetries = 3;
-      let attempt = 0;
-      
-      while (attempt < maxRetries) {
-        try {
-          attempt++;
-          logger.debug(`Opening subscribed site attempt ${attempt}/${maxRetries}`, {
+    // Skip if already active
+    if (this.activeSubscriptions.has(siteId)) {
+      logger.debug('Subscription already active', { siteId, siteName });
+      return;
+    }
+
+    logger.info('Setting up subscription sync', { siteId, siteName });
+    
+    const maxRetries = 5;
+    let attempt = 0;
+    
+    while (attempt < maxRetries) {
+      try {
+        attempt++;
+        
+        const subscribedSite = await this.openSubscribedSite(siteId, attempt, maxRetries);
+        if (!subscribedSite) continue;
+        
+        // Set up immediate event handling
+        await this.setupEventHandlers(subscribedSite, siteId, siteName);
+        
+        // Store subscription info
+        this.activeSubscriptions.set(siteId, {
+          site: subscribedSite,
+          siteName,
+          lastActivity: Date.now(),
+          reconnectAttempts: 0,
+        });
+        
+        // Perform initial sync
+        await this.performInitialSync(subscribedSite, siteId, siteName);
+        
+        // Set up health monitoring
+        this.setupHealthMonitoring(siteId);
+        
+        console.log(`✅ Subscription sync active: "${siteName || siteId}"`);
+        break;
+        
+      } catch (error) {
+        logger.warn(`Subscription setup attempt ${attempt} failed`, {
+          siteId,
+          siteName,
+          attempt,
+          error: error instanceof Error ? error.message : error,
+        });
+        
+        if (attempt === maxRetries) {
+          logger.error('Failed to setup subscription after all retries', {
             siteId,
             siteName,
+            maxRetries,
           });
-          
-          subscribedSite = await Promise.race([
-            client.open<Site>(siteId, { args: DEDICATED_SITE_ARGS }),
-            new Promise<never>((_, reject) => 
-              setTimeout(() => reject(new Error('Site open timeout')), 15000)
-            )
-          ]) as Site;
-          
-          logger.info('Successfully opened subscribed site', {
-            siteId,
-            siteName,
-            attempt,
-          });
-          break;
-          
-        } catch (openError) {
-          logger.warn(`Failed to open subscribed site on attempt ${attempt}`, {
-            siteId,
-            siteName,
-            attempt,
-            error: openError instanceof Error ? openError.message : openError,
-          });
-          
-          if (attempt === maxRetries) {
-            throw openError;
-          }
-          
-          // Wait before retry with exponential backoff
-          const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-          logger.debug(`Waiting ${waitTime}ms before retry`, { siteId, attempt });
+          // Schedule retry in background
+          setTimeout(() => this.retrySubscriptionSetup(subscription), 30000);
+        } else {
+          // Exponential backoff
+          const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 30000);
           await new Promise(resolve => setTimeout(resolve, waitTime));
         }
       }
+    }
+  }
+
+  private async openSubscribedSite(siteId: string, attempt: number, maxRetries: number): Promise<Site | null> {
+    try {
+      logger.debug(`Opening subscription site (${attempt}/${maxRetries})`, { siteId });
       
-      if (!subscribedSite) {
-        throw new Error('Failed to open subscribed site after all retries');
-      }
+      // Race against timeout with aggressive timeout reduction for faster feedback
+      const timeoutMs = Math.max(5000, 15000 - (attempt * 2000));
       
-      // Check if event listener is already set up to prevent duplicates
-      const existingListenerCount = subscribedSite.releases.events.listenerCount('change');
-      if (existingListenerCount > 0) {
-        logger.debug('Event listener already exists for subscription', {
-          siteId,
-          siteName,
-          existingListeners: existingListenerCount,
-        });
-        console.log(`ℹ️  Real-time sync already active for "${siteName || siteId}"`);
-        return;
-      }
+      const subscribedSite = await Promise.race([
+        this.client.open<Site>(siteId, { args: DEDICATED_SITE_ARGS }),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Site open timeout')), timeoutMs)
+        )
+      ]) as Site;
       
-      // Set up real-time event listener for this subscription
-      subscribedSite.releases.events.addEventListener('change', async (evt: any) => {
-        const added = evt.detail.added || [];
-        const removed = evt.detail.removed || [];
-        
-        logger.info('Subscription change event received', {
-          siteId,
-          siteName,
-          addedCount: added.length,
-          removedCount: removed.length,
-          eventDetail: evt.detail,
-        });
-        
-        if (added.length > 0) {
-          console.log(`📥 Received ${added.length} new releases from "${siteName || siteId}"`);
-          // Use setImmediate to avoid blocking the event loop
-          setImmediate(async () => {
-            try {
-              const federatedCount = await federateNewContent(localSite, added, siteId, siteName, lensService);
-              if (federatedCount > 0) {
-                console.log(`✅ Federated ${federatedCount} new releases from "${siteName || siteId}" in real-time`);
-              } else {
-                console.log(`ℹ️  No new content to federate from "${siteName || siteId}" (already exists locally)`);
-              }
-            } catch (federationError) {
-              const errorMessage = federationError instanceof Error ? federationError.message : String(federationError);
-              console.error(`❌ Federation failed for "${siteName || siteId}": ${errorMessage}`);
-              logError('Failed to federate new content in real-time', federationError instanceof Error ? federationError : new Error(String(federationError)), {
-                siteId,
-                siteName,
-                addedCount: added.length,
-              });
-            }
-          });
-        }
-        
-        if (removed.length > 0) {
-          console.log(`🗑️  Received ${removed.length} content removals from "${siteName || siteId}"`);
-          // Use setImmediate to avoid blocking the event loop
-          setImmediate(async () => {
-            try {
-              const cleanedCount = await cleanupRemovedContent(localSite, removed, siteId, lensService);
-              if (cleanedCount > 0) {
-                console.log(`🧹 Cleaned up ${cleanedCount} removed releases from "${siteName || siteId}" in real-time`);
-              } else {
-                console.log(`ℹ️  No federated content to clean up from "${siteName || siteId}"`);
-              }
-            } catch (cleanupError) {
-              const errorMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-              console.error(`❌ Cleanup failed for "${siteName || siteId}": ${errorMessage}`);
-              logError('Failed to cleanup removed content in real-time', cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)), {
-                siteId,
-                siteName,
-                removedCount: removed.length,
-              });
-            }
-          });
-        }
+      logger.info('Subscription site opened successfully', {
+        siteId,
+        attempt,
+        timeoutMs,
       });
       
-      console.log(`🔄 Real-time sync enabled for "${siteName || siteId}"`);
+      return subscribedSite;
       
-      // Perform initial sync to catch up on any missed content
-      try {
-        const currentReleases = await subscribedSite.releases.index.search(new SearchRequest({
-          fetch: 1000
-        }));
-        
-        if (currentReleases.length > 0) {
-          const federatedCount = await federateNewContent(localSite, currentReleases, siteId, siteName, lensService);
-          if (federatedCount > 0) {
-            console.log(`📦 Initial sync: federated ${federatedCount} releases from "${siteName || siteId}"`);
-          }
-        }
-      } catch (initialSyncError) {
-        logError('Failed to perform initial sync for subscription', initialSyncError, {
-          siteId,
-          siteName,
-        });
-      }
-      
-      // Set up cleanup for this subscription monitoring
-      process.on('SIGINT', () => {
-        logger.info('Closing subscribed site on shutdown', { siteId });
-        subscribedSite.close().catch(() => {});
+    } catch (error) {
+      logger.debug('Failed to open subscription site', {
+        siteId,
+        attempt,
+        error: error instanceof Error ? error.message : error,
       });
-      process.on('SIGTERM', () => {
-        logger.info('Closing subscribed site on shutdown', { siteId });
-        subscribedSite.close().catch(() => {});
-      });
-      
-    } catch (openError) {
-      logger.warn('Failed to open subscribed site for real-time sync', {
+      return null;
+    }
+  }
+
+  private async setupEventHandlers(subscribedSite: Site, siteId: string, siteName?: string) {
+    // Check if event listener is already set up to prevent duplicates
+    const existingListenerCount = subscribedSite.releases.events.listenerCount('change');
+    if (existingListenerCount > 0) {
+      logger.debug('Event listener already exists for subscription', {
         siteId,
         siteName,
-        error: openError instanceof Error ? openError.message : openError,
-        suggestion: 'Site may not be available from connected peers',
+        existingListeners: existingListenerCount,
+      });
+      return;
+    }
+    
+    // Set up immediate event handling - fully event-driven, no delays
+    subscribedSite.releases.events.addEventListener('change', (evt: any) => {
+      const added = evt.detail.added || [];
+      const removed = evt.detail.removed || [];
+      
+      // Update last activity immediately
+      const subscription = this.activeSubscriptions.get(siteId);
+      if (subscription) {
+        subscription.lastActivity = Date.now();
+        subscription.reconnectAttempts = 0; // Reset on successful activity
+      }
+      
+      logger.info('Real-time subscription event', {
+        siteId,
+        siteName,
+        addedCount: added.length,
+        removedCount: removed.length,
+        timestamp: Date.now(),
+      });
+      
+      // Handle additions immediately in parallel
+      if (added.length > 0) {
+        console.log(`📥 ${added.length} new releases from "${siteName || siteId}"`);
+        this.handleContentAddition(added, siteId, siteName).catch(error => {
+          logger.error('Content addition handling failed', {
+            siteId,
+            siteName,
+            error: error instanceof Error ? error.message : error,
+          });
+        });
+      }
+      
+      // Handle removals immediately in parallel  
+      if (removed.length > 0) {
+        console.log(`🗑️ ${removed.length} content removals from "${siteName || siteId}"`);
+        this.handleContentRemoval(removed, siteId, siteName).catch(error => {
+          logger.error('Content removal handling failed', {
+            siteId,
+            siteName,
+            error: error instanceof Error ? error.message : error,
+          });
+        });
+      }
+    });
+  }
+
+  private async handleContentAddition(added: any[], siteId: string, siteName?: string) {
+    try {
+      const federatedCount = await federateNewContent(this.localSite, added, siteId, siteName, this.lensService);
+      if (federatedCount > 0) {
+        console.log(`✅ Instantly federated ${federatedCount} releases from "${siteName || siteId}"`);
+      } else {
+        logger.debug('No new content to federate (already exists)', { siteId, siteName });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Federation failed for "${siteName || siteId}": ${errorMessage}`);
+      
+      // Try to recover the subscription if federation is failing
+      this.scheduleSubscriptionRecovery(siteId);
+    }
+  }
+
+  private async handleContentRemoval(removed: any[], siteId: string, siteName?: string) {
+    try {
+      const cleanedCount = await cleanupRemovedContent(this.localSite, removed, siteId, this.lensService);
+      if (cleanedCount > 0) {
+        console.log(`🧹 Instantly cleaned ${cleanedCount} releases from "${siteName || siteId}"`);
+      } else {
+        logger.debug('No federated content to clean up', { siteId, siteName });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Cleanup failed for "${siteName || siteId}": ${errorMessage}`);
+      
+      // Try to recover the subscription if cleanup is failing
+      this.scheduleSubscriptionRecovery(siteId);
+    }
+  }
+
+  private async performInitialSync(subscribedSite: Site, siteId: string, siteName?: string) {
+    try {
+      const currentReleases = await subscribedSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      
+      if (currentReleases.length > 0) {
+        const federatedCount = await federateNewContent(this.localSite, currentReleases, siteId, siteName, this.lensService);
+        if (federatedCount > 0) {
+          console.log(`📦 Initial sync: ${federatedCount} releases from "${siteName || siteId}"`);
+        }
+      }
+    } catch (error) {
+      logger.warn('Initial sync failed', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.message : error,
       });
     }
   }
+
+  private setupHealthMonitoring(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    // Health check every 30 seconds
+    subscription.healthCheckInterval = setInterval(() => {
+      this.performHealthCheck(siteId);
+    }, 30000);
+  }
+
+  private performHealthCheck(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    const timeSinceActivity = Date.now() - subscription.lastActivity;
+    const maxIdleTime = 5 * 60 * 1000; // 5 minutes
+    
+    if (timeSinceActivity > maxIdleTime) {
+      logger.warn('Subscription appears inactive, scheduling recovery', {
+        siteId,
+        siteName: subscription.siteName,
+        timeSinceActivity,
+        maxIdleTime,
+      });
+      this.scheduleSubscriptionRecovery(siteId);
+    }
+  }
+
+  private scheduleSubscriptionRecovery(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    subscription.reconnectAttempts++;
+    
+    // Exponential backoff for recovery attempts
+    const backoffTime = Math.min(1000 * Math.pow(2, subscription.reconnectAttempts - 1), 60000);
+    
+    logger.info('Scheduling subscription recovery', {
+      siteId,
+      siteName: subscription.siteName,
+      attempt: subscription.reconnectAttempts,
+      backoffTime,
+    });
+    
+    setTimeout(async () => {
+      try {
+        await this.recoverSubscription(siteId);
+      } catch (error) {
+        logger.error('Subscription recovery failed', {
+          siteId,
+          error: error instanceof Error ? error.message : error,
+        });
+      }
+    }, backoffTime);
+  }
+
+  private async recoverSubscription(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    logger.info('Attempting subscription recovery', {
+      siteId,
+      siteName: subscription.siteName,
+      attempt: subscription.reconnectAttempts,
+    });
+    
+    try {
+      // Close old connection
+      await subscription.site.close().catch(() => {});
+      
+      // Clear health check
+      if (subscription.healthCheckInterval) {
+        clearInterval(subscription.healthCheckInterval);
+      }
+      
+      // Remove from active subscriptions
+      this.activeSubscriptions.delete(siteId);
+      
+      // Retry setup
+      const subscriptionData = {
+        [SUBSCRIPTION_SITE_ID_PROPERTY]: siteId,
+        [SUBSCRIPTION_NAME_PROPERTY]: subscription.siteName,
+      };
+      
+      await this.setupSingleSubscription(subscriptionData);
+      
+    } catch (error) {
+      logger.error('Subscription recovery failed', {
+        siteId,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private async retrySubscriptionSetup(subscription: any) {
+    logger.info('Retrying subscription setup in background', {
+      siteId: subscription[SUBSCRIPTION_SITE_ID_PROPERTY],
+    });
+    
+    await this.setupSingleSubscription(subscription);
+  }
+
+  async shutdown() {
+    logger.info('Shutting down subscription sync manager');
+    
+    const shutdownPromises = Array.from(this.activeSubscriptions.entries()).map(async ([siteId, subscription]) => {
+      try {
+        if (subscription.healthCheckInterval) {
+          clearInterval(subscription.healthCheckInterval);
+        }
+        await subscription.site.close();
+      } catch (error) {
+        logger.debug('Error closing subscription during shutdown', { siteId });
+      }
+    });
+    
+    await Promise.allSettled(shutdownPromises);
+    this.activeSubscriptions.clear();
+  }
+}
+
+// Set up real-time sync for all existing subscriptions
+async function setupSubscriptionSync(client: Peerbit, localSite: Site, lensService: LensService, subscriptions: any[]) {
+  const syncManager = new SubscriptionSyncManager(client, localSite, lensService);
+  await syncManager.setupSubscriptionSync(subscriptions);
+  return syncManager;
 }
 
 // Set up comprehensive monitoring for sync events
