@@ -1280,24 +1280,38 @@ async function cleanGhostReleases(lensService: LensService) {
     
     statusManager.showMessage(`📊 Found ${allPeerbitReleases.length} releases in Peerbit store`);
     
-    // Get all releases via LensService
-    let lensServiceReleases = [];
-    try {
-      if (lensService && typeof lensService.getReleases === 'function') {
-        lensServiceReleases = await lensService.getReleases();
-        statusManager.showMessage(`📊 Found ${lensServiceReleases.length} releases via LensService`);
-      } else {
-        statusManager.showMessage('⚠️  LensService.getReleases not available, skipping comparison');
-        return;
-      }
-    } catch (error) {
-      statusManager.showMessage(`⚠️  Failed to get releases via LensService: ${(error as Error).message}`);
-      return;
-    }
+    // Get our own site ID
+    const ourSiteId = localSite.address;
     
-    // Find releases that exist in Peerbit but not in LensService
-    const lensServiceIds = new Set(lensServiceReleases.map((r: any) => r.id));
-    const ghostReleases = allPeerbitReleases.filter((release: any) => !lensServiceIds.has(release.id));
+    // Get current subscriptions to identify valid federated sites
+    const currentSubscriptions = await lensService.getSubscriptions();
+    const subscribedSiteIds = new Set(currentSubscriptions.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]));
+    
+    statusManager.showMessage(`📊 Found ${currentSubscriptions.length} current subscriptions`);
+    statusManager.showMessage(`📊 Our site ID: ${ourSiteId}`);
+    
+    // Find ghost releases: federated content from sites we're no longer subscribed to
+    const ghostReleases = allPeerbitReleases.filter((release: any) => {
+      const federatedFrom = (release as any).federatedFrom;
+      
+      // If it has no federatedFrom, it's our own content - keep it
+      if (!federatedFrom) {
+        return false;
+      }
+      
+      // If it's federated from our own site, keep it (shouldn't happen but be safe)
+      if (federatedFrom === ourSiteId) {
+        return false;
+      }
+      
+      // If it's federated from a site we're still subscribed to, keep it
+      if (subscribedSiteIds.has(federatedFrom)) {
+        return false;
+      }
+      
+      // Otherwise, it's a ghost - federated from a site we're no longer subscribed to
+      return true;
+    });
     
     if (ghostReleases.length === 0) {
       statusManager.showMessage('✅ No ghost releases found. All releases are properly synchronized.');
@@ -1305,9 +1319,23 @@ async function cleanGhostReleases(lensService: LensService) {
     }
     
     statusManager.showMessage(`👻 Found ${ghostReleases.length} ghost releases:`, true);
-    statusManager.showMessage(`   • Total in Peerbit: ${allPeerbitReleases.length}`, true);
-    statusManager.showMessage(`   • Total in LensService: ${lensServiceReleases.length}`, true);
-    statusManager.showMessage(`   • Ghost releases: ${ghostReleases.length}`, true);
+    statusManager.showMessage(`   • Total releases: ${allPeerbitReleases.length}`, true);
+    statusManager.showMessage(`   • Current subscriptions: ${currentSubscriptions.length}`, true);
+    statusManager.showMessage(`   • Ghost releases (from unsubscribed sites): ${ghostReleases.length}`, true);
+    
+    // Show which sites the ghosts are from
+    const ghostSources = new Map();
+    ghostReleases.forEach((release: any) => {
+      const source = (release as any).federatedFrom || 'unknown';
+      ghostSources.set(source, (ghostSources.get(source) || 0) + 1);
+    });
+    
+    if (ghostSources.size > 0) {
+      statusManager.showMessage(`   • Ghost sources:`, true);
+      Array.from(ghostSources.entries()).forEach(([siteId, count]) => {
+        statusManager.showMessage(`     - ${siteId}: ${count} releases`, true);
+      });
+    }
     
     // Show examples of ghost releases
     const examples = ghostReleases.slice(0, 5);
@@ -1346,13 +1374,24 @@ async function cleanGhostReleases(lensService: LensService) {
       
       for (const release of batch) {
         try {
+          // Try to delete from the releases store
           await localSite.releases.del(release.id);
-          cleanedCount++;
-          logger.debug('Cleaned ghost release', {
-            releaseId: release.id,
-            title: release.name || 'Untitled',
-            federatedFrom: (release as any).federatedFrom,
-          });
+          
+          // Verify the deletion worked by checking if it still exists
+          const stillExists = await localSite.releases.index.get(release.id);
+          if (!stillExists) {
+            cleanedCount++;
+            logger.debug('Successfully cleaned ghost release', {
+              releaseId: release.id,
+              title: release.name || 'Untitled',
+              federatedFrom: (release as any).federatedFrom,
+            });
+          } else {
+            logger.warn('Ghost release deletion failed - still exists after del()', {
+              releaseId: release.id,
+              title: release.name || 'Untitled',
+            });
+          }
         } catch (error) {
           logger.warn('Failed to clean ghost release', {
             releaseId: release.id,
@@ -1372,13 +1411,37 @@ async function cleanGhostReleases(lensService: LensService) {
     }
     
     statusManager.showMessage(`\n✅ Ghost release cleanup completed!`);
-    statusManager.showMessage(`   Successfully cleaned: ${cleanedCount}/${ghostReleases.length} releases\n`);
+    statusManager.showMessage(`   Successfully cleaned: ${cleanedCount}/${ghostReleases.length} releases`);
+    
+    // Verify cleanup by re-scanning
+    statusManager.showMessage(`   🔍 Verifying cleanup...`);
+    const postCleanupReleases = await localSite.releases.index.search(new SearchRequest({
+      fetch: 1000
+    }));
+    
+    // Use the same ghost detection logic
+    const remainingGhosts = postCleanupReleases.filter((release: any) => {
+      const federatedFrom = (release as any).federatedFrom;
+      if (!federatedFrom || federatedFrom === ourSiteId) return false;
+      return !subscribedSiteIds.has(federatedFrom);
+    });
+    
+    if (remainingGhosts.length > 0) {
+      statusManager.showMessage(`   ⚠️  Warning: ${remainingGhosts.length} ghost releases still remain after cleanup`);
+      logger.warn('Ghost releases still remain after cleanup', {
+        remainingCount: remainingGhosts.length,
+        remainingIds: remainingGhosts.slice(0, 5).map((r: any) => r.id),
+      });
+    } else {
+      statusManager.showMessage(`   ✅ All ghost releases successfully removed`);
+    }
     
     logger.info('Ghost release cleanup completed', {
       totalGhostReleases: ghostReleases.length,
       successfullyCleaned: cleanedCount,
-      peerbitCount: allPeerbitReleases.length,
-      lensServiceCount: lensServiceReleases.length,
+      remainingGhosts: remainingGhosts.length,
+      totalReleases: allPeerbitReleases.length,
+      currentSubscriptions: currentSubscriptions.length,
     });
     
   } catch (error) {
