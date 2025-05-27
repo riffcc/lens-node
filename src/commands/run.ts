@@ -27,9 +27,11 @@ class StatusLineManager {
   private statusLines: Map<string, string> = new Map();
   private isActive: boolean = false;
   private lastLineCount: number = 0;
+  private persistentMessages: string[] = [];
 
   activate() {
     this.isActive = true;
+    this.showMessage('📋 TUI Active - Status updates will appear below', true);
   }
 
   deactivate() {
@@ -37,15 +39,45 @@ class StatusLineManager {
     this.clearStatus();
   }
 
+  // Show a message that will persist until cleared
+  showMessage(message: string, persistent: boolean = false) {
+    if (!this.isActive) {
+      console.log(message);
+      return;
+    }
+
+    if (persistent) {
+      this.persistentMessages.push(message);
+    } else {
+      this.statusLines.set('temp', message);
+      // Clear temporary message after 3 seconds
+      setTimeout(() => {
+        this.statusLines.delete('temp');
+        this.render();
+      }, 3000);
+    }
+    this.render();
+  }
+
+  // Update a specific status line
   updateStatus(key: string, message: string) {
     if (!this.isActive) {
-      // When TUI is not active, just log normally
       logger.info(message);
       return;
     }
 
     this.statusLines.set(key, message);
     this.render();
+  }
+
+  // Clear a specific status line
+  clearStatus(key?: string) {
+    if (key) {
+      this.statusLines.delete(key);
+      this.render();
+    } else {
+      this.clearAllStatus();
+    }
   }
 
   private render() {
@@ -56,18 +88,21 @@ class StatusLineManager {
       process.stdout.write(`\x1b[${this.lastLineCount}A`);
     }
 
-    // Clear and rewrite status lines
-    const lines = Array.from(this.statusLines.values());
-    this.lastLineCount = lines.length;
+    // Combine persistent messages and status lines
+    const allLines = [
+      ...this.persistentMessages,
+      ...Array.from(this.statusLines.values())
+    ];
+    this.lastLineCount = allLines.length;
 
-    lines.forEach(line => {
+    allLines.forEach(line => {
       clearLine(process.stdout, 0);
       cursorTo(process.stdout, 0);
       process.stdout.write(`${line}\n`);
     });
   }
 
-  clearStatus() {
+  private clearAllStatus() {
     if (this.lastLineCount > 0) {
       // Move up and clear all status lines
       for (let i = 0; i < this.lastLineCount; i++) {
@@ -78,6 +113,7 @@ class StatusLineManager {
       this.lastLineCount = 0;
     }
     this.statusLines.clear();
+    this.persistentMessages = [];
   }
 }
 
@@ -126,6 +162,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       isShuttingDown = true;
 
       logger.info('Shutdown initiated', { signal });
+      statusManager.deactivate();
       console.log(`\nReceived ${signal}. Shutting down gracefully...`);
 
       try {
@@ -194,10 +231,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Read configuration
       if (siteAddress && onlyReplicate) {
-        console.log(`Using bootstrapped site address ${siteAddress}, resetting the config..`);
+        statusManager.showMessage(`Using bootstrapped site address ${siteAddress}, resetting the config..`);
         fs.rmSync(dir, { recursive: true, force: true });
         fs.mkdirSync(dir, { recursive: true });
-        console.log(`Node directory cleared and ready for new configuration at: ${dir}`);
+        statusManager.showMessage(`Node directory cleared and ready for new configuration at: ${dir}`);
         saveConfig({ address: siteAddress }, dir);
       }
 
@@ -238,7 +275,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
       
       if (bootstrapPeers.length > 0) {
-        console.log(`🔍 Enhanced DHT operations available with ${bootstrapPeers.length} bootstrap peers for content routing`);
+        statusManager.showMessage(`🔍 Enhanced DHT operations available with ${bootstrapPeers.length} bootstrap peers for content routing`);
       }
       
       client = await Peerbit.create({
@@ -291,7 +328,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           bootstrappers: bootstrappersList,
           count: bootstrappersList.length,
         });
-        console.log('Dialing bootstrappers...');
+        statusManager.showMessage('Dialing bootstrappers...');
         
         const promises = bootstrappersList.map((b) => client?.dial(b));
         const dialingResult = await Promise.allSettled(promises);
@@ -308,9 +345,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
           })),
         });
-        console.log(`
-          ${successful}/${dialingResult.length}bootstrappers addresses were dialed successfuly.
-        `);
+        statusManager.showMessage(`${successful}/${dialingResult.length} bootstrappers addresses were dialed successfully.`);
       }
 
       // Initialize LensService
@@ -415,7 +450,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             connectedPeers: client.libp2p.getConnections().length,
           });
           
-          console.log(`✅ Registered as DHT provider for ${site.address}`);
+          statusManager.showMessage(`✅ Registered as DHT provider for ${site.address}`);
           
           // Set up periodic re-advertisement to maintain DHT provider status
           const advertiseInterval = setInterval(async () => {
@@ -453,7 +488,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             suggestion: 'This is normal if no DHT bootstrap peers are configured',
             currentBootstrapPeers: bootstrapPeers.length,
           });
-          console.log('⚠️  DHT provider registration failed - content discovery limited to direct peers');
+          statusManager.showMessage('⚠️  DHT provider registration failed - content discovery limited to direct peers');
         }
       }
       
@@ -467,9 +502,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
       
       if (connections.length > 0) {
-        console.log(`✅ Connected to ${connections.length} peers - content replication active`);
+        statusManager.showMessage(`✅ Connected to ${connections.length} peers - content replication active`);
       } else {
-        console.log('⚠️  No peer connections - waiting for peers to connect');
+        statusManager.showMessage('⚠️  No peer connections - waiting for peers to connect');
       }
       
       // Set up comprehensive sync monitoring
@@ -565,7 +600,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         
         // Set up event-driven real-time sync for each existing subscription
         if (initialSubs.length > 0) {
-          console.log(`🔄 Setting up event-driven real-time sync for ${initialSubs.length} subscriptions...`);
+          statusManager.showMessage(`🔄 Setting up event-driven real-time sync for ${initialSubs.length} subscriptions...`);
           const syncManager = await setupSubscriptionSync(client!, site, lensService, initialSubs);
           
           // Store sync manager for later use with new subscriptions
@@ -656,6 +691,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       
       // Menu loop
       if (!onlyReplicate) {
+        // Activate status manager for TUI
+        statusManager.activate();
+        
         while (!isShuttingDown) {
           try {
             const answers = await inquirer.prompt(
@@ -712,13 +750,13 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
                     publicKey: stringPubkicKey,
                     accountType: accountType === 1 ? 'Member' : 'Admin',
                   });
-                  console.log('Account authorized successfully.');
+                  statusManager.showMessage('✅ Account authorized successfully.');
                 } catch (error) {
                   logError('Error authorizing account', error, {
                     publicKey: stringPubkicKey,
                     accountType,
                   });
-                  console.error(`Error on authorizing account: ${(error as Error).message}`);
+                  statusManager.showMessage(`❌ Error on authorizing account: ${(error as Error).message}`);
                 }
                 break;
               case 'subscriptions':
@@ -797,26 +835,26 @@ async function viewSubscriptions(lensService: LensService) {
     });
     
     if (subscriptions.length === 0) {
-      console.log('\nNo subscriptions found.\n');
+      statusManager.showMessage('No subscriptions found.');
       return;
     }
 
-    console.log('\nCurrent Subscriptions:');
-    console.log('─'.repeat(80));
+    statusManager.showMessage('Current Subscriptions:', true);
+    statusManager.showMessage('─'.repeat(80), true);
     
     subscriptions.forEach((sub, index) => {
-      console.log(`${index + 1}. Site ID: ${sub[SUBSCRIPTION_SITE_ID_PROPERTY]}`);
+      statusManager.showMessage(`${index + 1}. Site ID: ${sub[SUBSCRIPTION_SITE_ID_PROPERTY]}`, true);
       if (sub[SUBSCRIPTION_NAME_PROPERTY]) {
-        console.log(`   Name: ${sub[SUBSCRIPTION_NAME_PROPERTY]}`);
+        statusManager.showMessage(`   Name: ${sub[SUBSCRIPTION_NAME_PROPERTY]}`, true);
       }
-      console.log(`   Recursive: ${sub[SUBSCRIPTION_RECURSIVE_PROPERTY] ? 'Yes' : 'No'}`);
-      console.log(`   Type: ${sub.subscriptionType || 'direct'}`);
-      console.log('─'.repeat(80));
+      statusManager.showMessage(`   Recursive: ${sub[SUBSCRIPTION_RECURSIVE_PROPERTY] ? 'Yes' : 'No'}`, true);
+      statusManager.showMessage(`   Type: ${sub.subscriptionType || 'direct'}`, true);
+      statusManager.showMessage('─'.repeat(80), true);
     });
     
-    console.log('');
+    statusManager.showMessage('', true);
   } catch (error) {
-    console.error('Error fetching subscriptions:', (error as Error).message);
+    statusManager.showMessage(`Error fetching subscriptions: ${(error as Error).message}`);
   }
 }
 
@@ -871,9 +909,9 @@ async function subscribeSite(lensService: LensService) {
         id: result.id,
         hash: result.hash,
       });
-      console.log('\n✅ Successfully subscribed to site!');
-      console.log(`   Subscription ID: ${result.id}`);
-      console.log(`   Hash: ${result.hash}\n`);
+      statusManager.showMessage('✅ Successfully subscribed to site!');
+      statusManager.showMessage(`   Subscription ID: ${result.id}`, true);
+      statusManager.showMessage(`   Hash: ${result.hash}`, true);
       
       // Set up event-driven real-time sync for the new subscription immediately
       logger.info('Setting up event-driven real-time sync for new subscription', {
@@ -890,7 +928,7 @@ async function subscribeSite(lensService: LensService) {
           const newSyncManager = await setupSubscriptionSync(lensService!.client!, lensService!.siteProgram!, lensService!, [subscriptionData]);
           (lensService! as any).syncManager = newSyncManager;
         }
-        console.log('🔄 Event-driven real-time sync activated for new subscription');
+        statusManager.showMessage('🔄 Event-driven real-time sync activated for new subscription');
       } catch (syncError) {
         logError('Failed to set up event-driven real-time sync for new subscription', syncError, {
           siteId: subscriptionData[SUBSCRIPTION_SITE_ID_PROPERTY],
@@ -898,7 +936,7 @@ async function subscribeSite(lensService: LensService) {
       }
     } else {
       logError('Failed to add subscription', new Error(result.error || 'Unknown error'), subscriptionData);
-      console.error(`\n❌ Failed to subscribe: ${result.error}\n`);
+      statusManager.showMessage(`❌ Failed to subscribe: ${result.error}`);
     }
   } catch (error) {
     console.error('Error subscribing to site:', (error as Error).message);
@@ -910,7 +948,7 @@ async function unsubscribeSite(lensService: LensService) {
     const subscriptions = await lensService.getSubscriptions();
     
     if (subscriptions.length === 0) {
-      console.log('\nNo subscriptions to remove.\n');
+      statusManager.showMessage('No subscriptions to remove.');
       return;
     }
 
@@ -941,8 +979,8 @@ async function unsubscribeSite(lensService: LensService) {
     const siteId = subToDelete?.[SUBSCRIPTION_SITE_ID_PROPERTY];
     
     // Enhanced confirmation with content removal option
-    console.log(`\n📋 Unsubscribe from: ${siteName}`);
-    console.log(`🔗 Site ID: ${siteId}`);
+    statusManager.showMessage(`📋 Unsubscribe from: ${siteName}`, true);
+    statusManager.showMessage(`🔗 Site ID: ${siteId}`, true);
     
     const unsubscribeOptions = await inquirer.prompt([
       {
@@ -961,19 +999,19 @@ async function unsubscribeSite(lensService: LensService) {
     ]);
 
     if (!unsubscribeOptions.confirm) {
-      console.log('\n❌ Unsubscribe cancelled.\n');
+      statusManager.showMessage('❌ Unsubscribe cancelled.');
       return;
     }
 
     // Show summary of what will happen
-    console.log('\n📊 Unsubscribe Summary:');
-    console.log(`   • Lens: ${siteName}`);
-    console.log(`   • Remove subscription: ✅ Yes`);
-    console.log(`   • Remove federated content: ${unsubscribeOptions.removeContent ? '✅ Yes' : '❌ No'}`);
+    statusManager.showMessage('\n📊 Unsubscribe Summary:');
+    statusManager.showMessage(`   • Lens: ${siteName}`);
+    statusManager.showMessage(`   • Remove subscription: ✅ Yes`);
+    statusManager.showMessage(`   • Remove federated content: ${unsubscribeOptions.removeContent ? '✅ Yes' : '❌ No'}`);
     
     if (unsubscribeOptions.removeContent) {
-      console.log('\n⚠️  WARNING: This will permanently delete all content that was federated from this Lens!');
-      console.log('   Content originally created on your own site will NOT be affected.');
+      statusManager.showMessage('\n⚠️  WARNING: This will permanently delete all content that was federated from this Lens!');
+      statusManager.showMessage('   Content originally created on your own site will NOT be affected.');
       
       const finalConfirm = await inquirer.prompt([
         {
@@ -985,7 +1023,7 @@ async function unsubscribeSite(lensService: LensService) {
       ]);
       
       if (!finalConfirm.finalConfirm) {
-        console.log('\n❌ Unsubscribe cancelled.\n');
+        statusManager.showMessage('\n❌ Unsubscribe cancelled.\n');
         return;
       }
     }
@@ -1000,7 +1038,7 @@ async function unsubscribeSite(lensService: LensService) {
     // Remove federated content if requested
     let removedContentCount = 0;
     if (unsubscribeOptions.removeContent && siteId) {
-      console.log('\n🧹 Removing federated content...');
+      statusManager.updateStatus('content-removal', '🧹 Removing federated content...');
       try {
         removedContentCount = await removeFederatedContent(lensService, siteId, siteName);
       } catch (contentRemovalError) {
@@ -1009,7 +1047,7 @@ async function unsubscribeSite(lensService: LensService) {
           siteName,
         });
         console.error(`⚠️  Warning: Failed to remove some federated content: ${(contentRemovalError as Error).message}`);
-        console.log('Continuing with subscription removal...');
+        statusManager.showMessage('Continuing with subscription removal...');
       }
     }
     
@@ -1025,11 +1063,10 @@ async function unsubscribeSite(lensService: LensService) {
         removedContentCount,
       });
       
-      console.log('\n✅ Successfully unsubscribed!');
+      statusManager.showMessage('✅ Successfully unsubscribed!');
       if (unsubscribeOptions.removeContent) {
-        console.log(`🗑️  Removed ${removedContentCount} federated releases from "${siteName}"`);
+        statusManager.showMessage(`🗑️  Removed ${removedContentCount} federated releases from "${siteName}"`, true);
       }
-      console.log('');
     } else {
       logError('Failed to delete subscription', new Error(result.error || 'Unknown error'), {
         id: subscriptionId,
@@ -1048,7 +1085,7 @@ async function restoreDeletedContent(lensService: LensService) {
     const subscriptions = await lensService.getSubscriptions();
     
     if (subscriptions.length === 0) {
-      console.log('\nNo subscriptions found to restore content from.\n');
+      statusManager.showMessage('\nNo subscriptions found to restore content from.\n');
       return;
     }
 
@@ -1077,7 +1114,7 @@ async function restoreDeletedContent(lensService: LensService) {
     const siteId = selectedSubscription[SUBSCRIPTION_SITE_ID_PROPERTY];
     const siteName = selectedSubscription[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed Lens';
     
-    console.log(`\n🔄 Checking for restorable content from "${siteName}"...`);
+    statusManager.updateStatus('content-restore', `🔄 Checking for restorable content from "${siteName}"...`);
     
     try {
       // Check if site is already open in sync manager
@@ -1128,7 +1165,7 @@ async function restoreDeletedContent(lensService: LensService) {
       const restorableReleases = availableReleases.filter((release: any) => !localIds.has(release.id));
       
       if (restorableReleases.length === 0) {
-        console.log(`\n✅ No missing content found. All releases from "${siteName}" are already present locally.\n`);
+        statusManager.showMessage(`✅ No missing content found. All releases from "${siteName}" are already present locally.`);
         // Only close if we opened it (not already managed by sync manager)
         if (shouldCloseAfter) {
           await subscribedSite.close();
@@ -1136,24 +1173,24 @@ async function restoreDeletedContent(lensService: LensService) {
         return;
       }
       
-      console.log(`\n📦 Found ${restorableReleases.length} releases that can be restored from "${siteName}"`);
-      console.log(`   Total available: ${availableReleases.length}`);
-      console.log(`   Already present: ${availableReleases.length - restorableReleases.length}`);
-      console.log(`   Missing/Restorable: ${restorableReleases.length}\n`);
+      statusManager.showMessage(`📦 Found ${restorableReleases.length} releases that can be restored from "${siteName}"`, true);
+      statusManager.showMessage(`   Total available: ${availableReleases.length}`, true);
+      statusManager.showMessage(`   Already present: ${availableReleases.length - restorableReleases.length}`, true);
+      statusManager.showMessage(`   Missing/Restorable: ${restorableReleases.length}`, true);
       
       // Show some examples of what would be restored
       if (restorableReleases.length > 0) {
-        console.log('Examples of content that would be restored:');
+        statusManager.showMessage('Examples of content that would be restored:');
         const examples = restorableReleases.slice(0, 5);
         examples.forEach((release: any, index: number) => {
           const title = release.name || 'Untitled';
           const truncatedTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
-          console.log(`   ${index + 1}. ${truncatedTitle}`);
+          statusManager.showMessage(`   ${index + 1}. ${truncatedTitle}`);
         });
         if (restorableReleases.length > 5) {
-          console.log(`   ... and ${restorableReleases.length - 5} more`);
+          statusManager.showMessage(`   ... and ${restorableReleases.length - 5} more`);
         }
-        console.log('');
+        statusManager.showMessage('');
       }
       
       const restoreOptions = await inquirer.prompt([
@@ -1166,7 +1203,7 @@ async function restoreDeletedContent(lensService: LensService) {
       ]);
 
       if (!restoreOptions.confirm) {
-        console.log('\n❌ Content restoration cancelled.\n');
+        statusManager.showMessage('❌ Content restoration cancelled.');
         // Only close if we opened it (not already managed by sync manager)
         if (shouldCloseAfter) {
           await subscribedSite.close();
@@ -1174,7 +1211,7 @@ async function restoreDeletedContent(lensService: LensService) {
         return;
       }
 
-      console.log(`\n🔄 Restoring content from "${siteName}"...`);
+      statusManager.updateStatus('restore-progress', `🔄 Restoring content from "${siteName}"...`);
       
       // Restore content in batches
       let restoredCount = 0;
@@ -1188,7 +1225,7 @@ async function restoreDeletedContent(lensService: LensService) {
         
         // Progress indicator
         const progress = Math.min(i + batchSize, restorableReleases.length);
-        console.log(`   Restored ${progress}/${restorableReleases.length} releases...`);
+        statusManager.updateStatus('restore-progress', `   Restored ${progress}/${restorableReleases.length} releases...`);
         
         // Small delay between batches
         if (i + batchSize < restorableReleases.length) {
@@ -1201,9 +1238,9 @@ async function restoreDeletedContent(lensService: LensService) {
         await subscribedSite.close();
       }
       
-      console.log(`\n✅ Content restoration completed!`);
-      console.log(`   Successfully restored: ${restoredCount}/${restorableReleases.length} releases`);
-      console.log(`   From: "${siteName}"\n`);
+      statusManager.showMessage(`✅ Content restoration completed!`);
+      statusManager.showMessage(`   Successfully restored: ${restoredCount}/${restorableReleases.length} releases`, true);
+      statusManager.showMessage(`   From: "${siteName}"`, true);
       
       logger.info('Content restoration completed', {
         siteId,
@@ -1228,11 +1265,11 @@ async function restoreDeletedContent(lensService: LensService) {
 
 async function cleanGhostReleases(lensService: LensService) {
   try {
-    console.log('\n🔍 Scanning for ghost releases...');
+    statusManager.updateStatus('ghost-scan', '🔍 Scanning for ghost releases...');
     
     const localSite = lensService.siteProgram;
     if (!localSite) {
-      console.log('❌ Local site not available');
+      statusManager.showMessage('❌ Local site not available');
       return;
     }
     
@@ -1241,20 +1278,20 @@ async function cleanGhostReleases(lensService: LensService) {
       fetch: 1000
     }));
     
-    console.log(`📊 Found ${allPeerbitReleases.length} releases in Peerbit store`);
+    statusManager.showMessage(`📊 Found ${allPeerbitReleases.length} releases in Peerbit store`);
     
     // Get all releases via LensService
     let lensServiceReleases = [];
     try {
       if (lensService && typeof lensService.getReleases === 'function') {
         lensServiceReleases = await lensService.getReleases();
-        console.log(`📊 Found ${lensServiceReleases.length} releases via LensService`);
+        statusManager.showMessage(`📊 Found ${lensServiceReleases.length} releases via LensService`);
       } else {
-        console.log('⚠️  LensService.getReleases not available, skipping comparison');
+        statusManager.showMessage('⚠️  LensService.getReleases not available, skipping comparison');
         return;
       }
     } catch (error) {
-      console.log(`⚠️  Failed to get releases via LensService: ${(error as Error).message}`);
+      statusManager.showMessage(`⚠️  Failed to get releases via LensService: ${(error as Error).message}`);
       return;
     }
     
@@ -1263,14 +1300,14 @@ async function cleanGhostReleases(lensService: LensService) {
     const ghostReleases = allPeerbitReleases.filter((release: any) => !lensServiceIds.has(release.id));
     
     if (ghostReleases.length === 0) {
-      console.log('\n✅ No ghost releases found. All releases are properly synchronized.\n');
+      statusManager.showMessage('✅ No ghost releases found. All releases are properly synchronized.');
       return;
     }
     
-    console.log(`\n👻 Found ${ghostReleases.length} ghost releases:`);
-    console.log(`   • Total in Peerbit: ${allPeerbitReleases.length}`);
-    console.log(`   • Total in LensService: ${lensServiceReleases.length}`);
-    console.log(`   • Ghost releases: ${ghostReleases.length}\n`);
+    statusManager.showMessage(`👻 Found ${ghostReleases.length} ghost releases:`, true);
+    statusManager.showMessage(`   • Total in Peerbit: ${allPeerbitReleases.length}`, true);
+    statusManager.showMessage(`   • Total in LensService: ${lensServiceReleases.length}`, true);
+    statusManager.showMessage(`   • Ghost releases: ${ghostReleases.length}`, true);
     
     // Show examples of ghost releases
     const examples = ghostReleases.slice(0, 5);
@@ -1278,12 +1315,12 @@ async function cleanGhostReleases(lensService: LensService) {
       const title = release.name || 'Untitled';
       const truncatedTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
       const federatedFrom = (release as any).federatedFrom ? ` (from ${(release as any).federatedFrom})` : '';
-      console.log(`   ${index + 1}. ${truncatedTitle}${federatedFrom}`);
+      statusManager.showMessage(`   ${index + 1}. ${truncatedTitle}${federatedFrom}`);
     });
     if (ghostReleases.length > 5) {
-      console.log(`   ... and ${ghostReleases.length - 5} more`);
+      statusManager.showMessage(`   ... and ${ghostReleases.length - 5} more`);
     }
-    console.log('');
+    statusManager.showMessage('');
     
     const cleanupOptions = await inquirer.prompt([
       {
@@ -1295,11 +1332,11 @@ async function cleanGhostReleases(lensService: LensService) {
     ]);
 
     if (!cleanupOptions.confirm) {
-      console.log('\n❌ Ghost release cleanup cancelled.\n');
+      statusManager.showMessage('❌ Ghost release cleanup cancelled.');
       return;
     }
 
-    console.log(`\n🧹 Cleaning up ${ghostReleases.length} ghost releases...`);
+    statusManager.updateStatus('ghost-cleanup', `🧹 Cleaning up ${ghostReleases.length} ghost releases...`);
     
     let cleanedCount = 0;
     const batchSize = 10;
@@ -1326,7 +1363,7 @@ async function cleanGhostReleases(lensService: LensService) {
       
       // Progress indicator
       const progress = Math.min(i + batchSize, ghostReleases.length);
-      console.log(`   Cleaned ${progress}/${ghostReleases.length} ghost releases...`);
+      statusManager.showMessage(`   Cleaned ${progress}/${ghostReleases.length} ghost releases...`);
       
       // Small delay between batches
       if (i + batchSize < ghostReleases.length) {
@@ -1334,8 +1371,8 @@ async function cleanGhostReleases(lensService: LensService) {
       }
     }
     
-    console.log(`\n✅ Ghost release cleanup completed!`);
-    console.log(`   Successfully cleaned: ${cleanedCount}/${ghostReleases.length} releases\n`);
+    statusManager.showMessage(`\n✅ Ghost release cleanup completed!`);
+    statusManager.showMessage(`   Successfully cleaned: ${cleanedCount}/${ghostReleases.length} releases\n`);
     
     logger.info('Ghost release cleanup completed', {
       totalGhostReleases: ghostReleases.length,
@@ -1417,11 +1454,11 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
     });
     
     if (federatedReleases.length === 0) {
-      console.log(`   No federated content found from "${siteName}"`);
+      statusManager.showMessage(`   No federated content found from "${siteName}"`);
       return 0;
     }
     
-    console.log(`   Found ${federatedReleases.length} releases to remove from "${siteName}"`);
+    statusManager.showMessage(`   Found ${federatedReleases.length} releases to remove from "${siteName}"`);
     
     // Remove federated releases in batches
     let removedCount = 0;
@@ -1507,7 +1544,7 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
       
       // Progress indicator
       const progress = Math.min(i + batchSize, federatedReleases.length);
-      console.log(`   Removed ${progress}/${federatedReleases.length} releases...`);
+      statusManager.showMessage(`   Removed ${progress}/${federatedReleases.length} releases...`);
       
       // Small delay between batches
       if (i + batchSize < federatedReleases.length) {
@@ -1530,9 +1567,9 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
         successfullyRemoved: removedCount,
       });
       
-      console.log(`\n⚠️  Warning: ${remainingCheck.length} federated releases still remain after cleanup.`);
-      console.log(`   This might be due to caching or replication delays.`);
-      console.log(`   Try running the cleanup again or restart the node to clear caches.\n`);
+      statusManager.showMessage(`\n⚠️  Warning: ${remainingCheck.length} federated releases still remain after cleanup.`);
+      statusManager.showMessage(`   This might be due to caching or replication delays.`);
+      statusManager.showMessage(`   Try running the cleanup again or restart the node to clear caches.\n`);
     }
     
     logger.info('Federated content removal completed', {
@@ -1592,7 +1629,7 @@ async function syncContentRemovals(localSite: Site, subscribedSite: Site, siteId
       return 0;
     }
     
-    console.log(`   Found ${releasesToRemove.length} releases that were removed from source - cleaning up...`);
+    statusManager.showMessage(`   Found ${releasesToRemove.length} releases that were removed from source - cleaning up...`);
     
     // Remove orphaned federated releases
     let removedCount = 0;
@@ -1626,7 +1663,7 @@ async function syncContentRemovals(localSite: Site, subscribedSite: Site, siteId
     });
     
     if (removedCount > 0) {
-      console.log(`   ✅ Cleaned up ${removedCount} orphaned releases`);
+      statusManager.showMessage(`   ✅ Cleaned up ${removedCount} orphaned releases`);
     }
     
     return removedCount;
@@ -1915,7 +1952,7 @@ class SubscriptionSyncManager {
     
     await Promise.allSettled(setupPromises);
     
-    console.log(`🔄 Real-time sync active for ${this.activeSubscriptions.size}/${subscriptions.length} subscriptions`);
+    statusManager.showMessage(`🔄 Real-time sync active for ${this.activeSubscriptions.size}/${subscriptions.length} subscriptions`);
   }
 
   private async setupSingleSubscription(subscription: any) {
@@ -1957,7 +1994,7 @@ class SubscriptionSyncManager {
         // Set up health monitoring
         this.setupHealthMonitoring(siteId);
         
-        console.log(`✅ Subscription sync active: "${siteName || siteId}"`);
+        statusManager.showMessage(`✅ Subscription sync active: "${siteName || siteId}"`);
         break;
         
       } catch (error) {
@@ -2296,7 +2333,7 @@ class SubscriptionSyncManager {
       if (currentReleases.length > 0) {
         const federatedCount = await federateNewContent(this.localSite, currentReleases, siteId, siteName, this.lensService);
         if (federatedCount > 0) {
-          console.log(`📦 Initial sync: ${federatedCount} releases from "${siteName || siteId}"`);
+          statusManager.showMessage(`📦 Initial sync: ${federatedCount} releases from "${siteName || siteId}"`);
         }
       }
     } catch (error) {
