@@ -673,6 +673,7 @@ async function handleSubscriptionMenu(lensService: LensService) {
         { name: 'Subscribe to a Site', value: 'subscribe' },
         { name: 'Unsubscribe from a Site', value: 'unsubscribe' },
         { name: 'Restore Deleted Content', value: 'restore' },
+        { name: 'Clean Ghost Releases', value: 'clean' },
         { name: 'Back to Main Menu', value: 'back' },
       ],
     });
@@ -689,6 +690,9 @@ async function handleSubscriptionMenu(lensService: LensService) {
         break;
       case 'restore':
         await restoreDeletedContent(lensService);
+        break;
+      case 'clean':
+        await cleanGhostReleases(lensService);
         break;
       case 'back':
         return;
@@ -1110,6 +1114,133 @@ async function restoreDeletedContent(lensService: LensService) {
   }
 }
 
+async function cleanGhostReleases(lensService: LensService) {
+  try {
+    console.log('\n🔍 Scanning for ghost releases...');
+    
+    const localSite = lensService.siteProgram;
+    if (!localSite) {
+      console.log('❌ Local site not available');
+      return;
+    }
+    
+    // Get all releases from Peerbit store
+    const allPeerbitReleases = await localSite.releases.index.search(new SearchRequest({
+      fetch: 1000
+    }));
+    
+    console.log(`📊 Found ${allPeerbitReleases.length} releases in Peerbit store`);
+    
+    // Get all releases via LensService
+    let lensServiceReleases = [];
+    try {
+      if (lensService && typeof lensService.getReleases === 'function') {
+        lensServiceReleases = await lensService.getReleases();
+        console.log(`📊 Found ${lensServiceReleases.length} releases via LensService`);
+      } else {
+        console.log('⚠️  LensService.getReleases not available, skipping comparison');
+        return;
+      }
+    } catch (error) {
+      console.log(`⚠️  Failed to get releases via LensService: ${(error as Error).message}`);
+      return;
+    }
+    
+    // Find releases that exist in Peerbit but not in LensService
+    const lensServiceIds = new Set(lensServiceReleases.map((r: any) => r.id));
+    const ghostReleases = allPeerbitReleases.filter((release: any) => !lensServiceIds.has(release.id));
+    
+    if (ghostReleases.length === 0) {
+      console.log('\n✅ No ghost releases found. All releases are properly synchronized.\n');
+      return;
+    }
+    
+    console.log(`\n👻 Found ${ghostReleases.length} ghost releases:`);
+    console.log(`   • Total in Peerbit: ${allPeerbitReleases.length}`);
+    console.log(`   • Total in LensService: ${lensServiceReleases.length}`);
+    console.log(`   • Ghost releases: ${ghostReleases.length}\n`);
+    
+    // Show examples of ghost releases
+    const examples = ghostReleases.slice(0, 5);
+    examples.forEach((release: any, index: number) => {
+      const title = release.name || 'Untitled';
+      const truncatedTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+      const federatedFrom = (release as any).federatedFrom ? ` (from ${(release as any).federatedFrom})` : '';
+      console.log(`   ${index + 1}. ${truncatedTitle}${federatedFrom}`);
+    });
+    if (ghostReleases.length > 5) {
+      console.log(`   ... and ${ghostReleases.length - 5} more`);
+    }
+    console.log('');
+    
+    const cleanupOptions = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirm',
+        message: `Clean up ${ghostReleases.length} ghost releases?`,
+        default: false,
+      },
+    ]);
+
+    if (!cleanupOptions.confirm) {
+      console.log('\n❌ Ghost release cleanup cancelled.\n');
+      return;
+    }
+
+    console.log(`\n🧹 Cleaning up ${ghostReleases.length} ghost releases...`);
+    
+    let cleanedCount = 0;
+    const batchSize = 10;
+    
+    for (let i = 0; i < ghostReleases.length; i += batchSize) {
+      const batch = ghostReleases.slice(i, i + batchSize);
+      
+      for (const release of batch) {
+        try {
+          await localSite.releases.del(release.id);
+          cleanedCount++;
+          logger.debug('Cleaned ghost release', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            federatedFrom: (release as any).federatedFrom,
+          });
+        } catch (error) {
+          logger.warn('Failed to clean ghost release', {
+            releaseId: release.id,
+            error: error instanceof Error ? error.message : error,
+          });
+        }
+      }
+      
+      // Progress indicator
+      const progress = Math.min(i + batchSize, ghostReleases.length);
+      console.log(`   Cleaned ${progress}/${ghostReleases.length} ghost releases...`);
+      
+      // Small delay between batches
+      if (i + batchSize < ghostReleases.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    console.log(`\n✅ Ghost release cleanup completed!`);
+    console.log(`   Successfully cleaned: ${cleanedCount}/${ghostReleases.length} releases\n`);
+    
+    logger.info('Ghost release cleanup completed', {
+      totalGhostReleases: ghostReleases.length,
+      successfullyCleaned: cleanedCount,
+      peerbitCount: allPeerbitReleases.length,
+      lensServiceCount: lensServiceReleases.length,
+    });
+    
+  } catch (error) {
+    console.error('Error cleaning ghost releases:', (error as Error).message);
+    logger.error('Ghost release cleanup failed', {
+      error: error instanceof Error ? error.message : error,
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+  }
+}
+
 // Remove all federated content from a specific site
 async function removeFederatedContent(lensService: LensService, siteId: string, siteName: string): Promise<number> {
   logger.info('Starting federated content removal', {
@@ -1155,25 +1286,59 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
       
       for (const release of batch) {
         try {
-          const deleteResult = await lensService.deleteRelease({ id: release.id });
-          if (deleteResult.success) {
-            removedCount++;
-            logger.debug('Removed federated release', {
-              releaseId: release.id,
-              title: release.name || 'Untitled',
-              siteId,
-            });
+          logger.debug('Attempting to delete federated release', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            siteId,
+            hasLensService: !!lensService,
+            deleteReleaseType: lensService ? typeof lensService.deleteRelease : 'N/A',
+          });
+          
+          if (lensService && typeof lensService.deleteRelease === 'function') {
+            const deleteResult = await lensService.deleteRelease({ id: release.id });
+            if (deleteResult && deleteResult.success) {
+              removedCount++;
+              logger.info('Successfully removed federated release via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+            } else {
+              logger.warn('LensService failed to remove federated release', {
+                releaseId: release.id,
+                error: deleteResult?.error || 'Unknown error',
+                deleteResult,
+                siteId,
+              });
+            }
           } else {
-            logger.warn('Failed to remove federated release', {
+            // Try direct deletion from the site
+            logger.warn('LensService not available, attempting direct deletion', {
               releaseId: release.id,
-              error: deleteResult.error,
-              siteId,
+              hasLensService: !!lensService,
+              deleteReleaseType: lensService ? typeof lensService.deleteRelease : 'N/A',
             });
+            
+            try {
+              await site.releases.del(release.id);
+              removedCount++;
+              logger.info('Successfully removed federated release via direct deletion', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+            } catch (directError) {
+              logger.error('Direct deletion failed', {
+                releaseId: release.id,
+                error: directError instanceof Error ? directError.message : directError,
+              });
+            }
           }
         } catch (removeError) {
-          logger.warn('Error removing federated release', {
+          logger.error('Error removing federated release', {
             releaseId: release.id,
             error: removeError instanceof Error ? removeError.message : removeError,
+            stack: removeError instanceof Error ? removeError.stack : undefined,
             siteId,
           });
         }
@@ -1324,39 +1489,71 @@ async function federateNewContent(localSite: Site, newReleases: any[], siteId: s
           };
           
           // Use LensService if available, otherwise fall back to direct insertion
-          if (lensService && lensService.addRelease) {
+          if (lensService && typeof lensService.addRelease === 'function') {
             try {
+              logger.debug('Attempting to add release via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+                siteName,
+                hasLensService: !!lensService,
+                addReleaseType: typeof lensService.addRelease,
+              });
+              
               const addResult = await lensService.addRelease(federatedRelease);
-              if (addResult.success) {
+              if (addResult && addResult.success) {
                 federatedCount++;
                 existingIds.add(release.id); // Update our cache
-                logger.debug('Real-time federation: Added release via LensService', {
+                logger.info('Successfully federated release via LensService', {
                   releaseId: release.id,
                   title: release.name || 'Untitled',
                   siteId,
                   siteName,
+                  resultId: addResult.id,
+                  resultHash: addResult.hash,
                 });
               } else {
                 logger.warn('LensService failed to add federated release', {
                   releaseId: release.id,
-                  error: addResult.error,
+                  error: addResult?.error || 'Unknown error',
+                  addResult,
                 });
               }
             } catch (lensError) {
-              logger.warn('LensService error, skipping release', {
+              logger.error('LensService error during federation', {
                 releaseId: release.id,
                 error: lensError instanceof Error ? lensError.message : lensError,
+                stack: lensError instanceof Error ? lensError.stack : undefined,
               });
             }
           } else {
-            // Just count what would be federated without LensService
-            logger.debug('Real-time federation: Would add release (no LensService)', {
+            logger.warn('LensService not available for federation', {
               releaseId: release.id,
               title: release.name || 'Untitled',
               siteId,
               siteName,
+              hasLensService: !!lensService,
+              lensServiceType: typeof lensService,
+              addReleaseType: lensService ? typeof lensService.addRelease : 'N/A',
             });
-            federatedCount++;
+            
+            // Try direct insertion to the site
+            try {
+              await localSite.releases.put(federatedRelease);
+              federatedCount++;
+              existingIds.add(release.id);
+              logger.info('Direct federation successful', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+                siteName,
+              });
+            } catch (directError) {
+              logger.error('Direct federation failed', {
+                releaseId: release.id,
+                error: directError instanceof Error ? directError.message : directError,
+              });
+            }
           }
         }
       } catch (releaseError) {
@@ -1415,12 +1612,12 @@ async function cleanupRemovedContent(localSite: Site, removedReleases: any[], si
     for (const release of localReleasesToRemove) {
       try {
         // Use LensService if available for proper deletion
-        if (lensService && lensService.deleteRelease) {
+        if (lensService && typeof lensService.deleteRelease === 'function') {
           try {
             const deleteResult = await lensService.deleteRelease({ id: release.id });
-            if (deleteResult.success) {
+            if (deleteResult && deleteResult.success) {
               cleanedCount++;
-              logger.debug('Real-time cleanup: Removed release via LensService', {
+              logger.info('Real-time cleanup: Removed release via LensService', {
                 releaseId: release.id,
                 title: release.name || 'Untitled',
                 siteId,
@@ -1428,23 +1625,41 @@ async function cleanupRemovedContent(localSite: Site, removedReleases: any[], si
             } else {
               logger.warn('LensService failed to delete federated release', {
                 releaseId: release.id,
-                error: deleteResult.error,
+                error: deleteResult?.error || 'Unknown error',
+                deleteResult,
               });
             }
           } catch (lensError) {
-            logger.warn('LensService deletion error', {
+            logger.error('LensService deletion error', {
               releaseId: release.id,
               error: lensError instanceof Error ? lensError.message : lensError,
+              stack: lensError instanceof Error ? lensError.stack : undefined,
             });
           }
         } else {
-          // Just count what would be removed without LensService
-          logger.debug('Real-time cleanup: Would remove release (no LensService)', {
+          // Try direct deletion from the site
+          logger.warn('LensService not available, attempting direct cleanup deletion', {
             releaseId: release.id,
             title: release.name || 'Untitled',
             siteId,
+            hasLensService: !!lensService,
+            deleteReleaseType: lensService ? typeof lensService.deleteRelease : 'N/A',
           });
-          cleanedCount++;
+          
+          try {
+            await localSite.releases.del(release.id);
+            cleanedCount++;
+            logger.info('Real-time cleanup: Direct deletion successful', {
+              releaseId: release.id,
+              title: release.name || 'Untitled',
+              siteId,
+            });
+          } catch (directError) {
+            logger.error('Real-time cleanup: Direct deletion failed', {
+              releaseId: release.id,
+              error: directError instanceof Error ? directError.message : directError,
+            });
+          }
         }
         
       } catch (removeError) {
@@ -1652,62 +1867,225 @@ class SubscriptionSyncManager {
         timestamp: Date.now(),
       });
       
-      // Handle additions immediately in parallel
+      // Handle additions immediately - eventually consistent
       if (added.length > 0) {
-        console.log(`📥 ${added.length} new releases from "${siteName || siteId}"`);
+        console.log(`📥 ${added.length} new releases from "${siteName || siteId}" - syncing immediately`);
+        // Fire-and-forget for maximum speed, with error recovery
         this.handleContentAddition(added, siteId, siteName).catch(error => {
-          logger.error('Content addition handling failed', {
+          logger.warn('Content addition failed, will retry', {
             siteId,
             siteName,
             error: error instanceof Error ? error.message : error,
           });
+          // Retry in background for eventual consistency
+          setTimeout(() => {
+            this.handleContentAddition(added, siteId, siteName).catch(() => {
+              logger.error('Content addition retry failed', { siteId, siteName });
+            });
+          }, 5000);
         });
       }
       
-      // Handle removals immediately in parallel  
+      // Handle removals immediately - eventually consistent
       if (removed.length > 0) {
-        console.log(`🗑️ ${removed.length} content removals from "${siteName || siteId}"`);
+        console.log(`🗑️ ${removed.length} content removals from "${siteName || siteId}" - syncing immediately`);
+        // Fire-and-forget for maximum speed, with error recovery
         this.handleContentRemoval(removed, siteId, siteName).catch(error => {
-          logger.error('Content removal handling failed', {
+          logger.warn('Content removal failed, will retry', {
             siteId,
             siteName,
             error: error instanceof Error ? error.message : error,
           });
+          // Retry in background for eventual consistency
+          setTimeout(() => {
+            this.handleContentRemoval(removed, siteId, siteName).catch(() => {
+              logger.error('Content removal retry failed', { siteId, siteName });
+            });
+          }, 5000);
         });
       }
     });
   }
 
   private async handleContentAddition(added: any[], siteId: string, siteName?: string) {
+    const startTime = Date.now();
+    
     try {
-      const federatedCount = await federateNewContent(this.localSite, added, siteId, siteName, this.lensService);
+      // Process additions in parallel for maximum speed
+      const federationPromises = added.map(async (release) => {
+        try {
+          // Check for existing release first (optimistic check)
+          const existingReleases = await this.localSite.releases.index.search(new SearchRequest({
+            query: { id: release.id }
+          }));
+          
+          if (existingReleases.length > 0) {
+            logger.debug('Release already exists, skipping', {
+              releaseId: release.id,
+              siteId,
+            });
+            return false;
+          }
+          
+          // Prepare federated release with metadata
+          const federatedRelease = {
+            ...release,
+            federatedFrom: siteId,
+            federatedAt: new Date().toISOString(),
+            federatedRealtime: true,
+          };
+          
+          // Try LensService first for UI consistency
+          if (this.lensService && typeof this.lensService.addRelease === 'function') {
+            const addResult = await this.lensService.addRelease(federatedRelease);
+            if (addResult && addResult.success) {
+              logger.debug('Federated via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+              return true;
+            }
+          }
+          
+          // Fallback to direct Peerbit insertion for eventual consistency
+          await this.localSite.releases.put(federatedRelease);
+          logger.debug('Federated via direct Peerbit', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            siteId,
+          });
+          return true;
+          
+        } catch (releaseError) {
+          logger.warn('Failed to federate individual release', {
+            releaseId: release.id,
+            error: releaseError instanceof Error ? releaseError.message : releaseError,
+          });
+          return false;
+        }
+      });
+      
+      // Wait for all federation attempts to complete
+      const results = await Promise.allSettled(federationPromises);
+      const federatedCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+      const duration = Date.now() - startTime;
+      
       if (federatedCount > 0) {
-        console.log(`✅ Instantly federated ${federatedCount} releases from "${siteName || siteId}"`);
-      } else {
-        logger.debug('No new content to federate (already exists)', { siteId, siteName });
+        console.log(`✅ Federated ${federatedCount}/${added.length} releases from "${siteName || siteId}" in ${duration}ms`);
       }
+      
+      logger.info('Content addition completed', {
+        siteId,
+        siteName,
+        totalAdded: added.length,
+        federatedCount,
+        duration,
+        successRate: ((federatedCount / added.length) * 100).toFixed(1),
+      });
+      
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`❌ Federation failed for "${siteName || siteId}": ${errorMessage}`);
+      console.error(`❌ Federation batch failed for "${siteName || siteId}": ${errorMessage}`);
+      logger.error('Federation batch error', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.stack : error,
+        duration: Date.now() - startTime,
+      });
       
-      // Try to recover the subscription if federation is failing
+      // Schedule recovery for failed operations
       this.scheduleSubscriptionRecovery(siteId);
     }
   }
 
   private async handleContentRemoval(removed: any[], siteId: string, siteName?: string) {
+    const startTime = Date.now();
+    
     try {
-      const cleanedCount = await cleanupRemovedContent(this.localSite, removed, siteId, this.lensService);
-      if (cleanedCount > 0) {
-        console.log(`🧹 Instantly cleaned ${cleanedCount} releases from "${siteName || siteId}"`);
-      } else {
-        logger.debug('No federated content to clean up', { siteId, siteName });
+      // Get all local releases that were federated from this site
+      const allLocalReleases = await this.localSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      const localFederatedReleases = allLocalReleases.filter((release: any) => 
+        (release as any).federatedFrom === siteId
+      );
+      
+      // Find which removed releases exist locally
+      const removedIds = new Set(removed.map((release: any) => release.id));
+      const localReleasesToRemove = localFederatedReleases.filter((release: any) => 
+        removedIds.has(release.id)
+      );
+      
+      if (localReleasesToRemove.length === 0) {
+        logger.debug('No federated content to clean up', { siteId, siteName, removedCount: removed.length });
+        return;
       }
+      
+      // Process removals in parallel for maximum speed
+      const removalPromises = localReleasesToRemove.map(async (release) => {
+        try {
+          // Try LensService first for UI consistency
+          if (this.lensService && typeof this.lensService.deleteRelease === 'function') {
+            const deleteResult = await this.lensService.deleteRelease({ id: release.id });
+            if (deleteResult && deleteResult.success) {
+              logger.debug('Removed via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+              return true;
+            }
+          }
+          
+          // Fallback to direct Peerbit deletion for eventual consistency
+          await this.localSite.releases.del(release.id);
+          logger.debug('Removed via direct Peerbit', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            siteId,
+          });
+          return true;
+          
+        } catch (removalError) {
+          logger.warn('Failed to remove individual release', {
+            releaseId: release.id,
+            error: removalError instanceof Error ? removalError.message : removalError,
+          });
+          return false;
+        }
+      });
+      
+      // Wait for all removal attempts to complete
+      const results = await Promise.allSettled(removalPromises);
+      const cleanedCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+      const duration = Date.now() - startTime;
+      
+      if (cleanedCount > 0) {
+        console.log(`🧹 Cleaned ${cleanedCount}/${localReleasesToRemove.length} releases from "${siteName || siteId}" in ${duration}ms`);
+      }
+      
+      logger.info('Content removal completed', {
+        siteId,
+        siteName,
+        totalRemoved: removed.length,
+        localReleasesToRemove: localReleasesToRemove.length,
+        cleanedCount,
+        duration,
+        successRate: localReleasesToRemove.length > 0 ? ((cleanedCount / localReleasesToRemove.length) * 100).toFixed(1) : '100',
+      });
+      
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`❌ Cleanup failed for "${siteName || siteId}": ${errorMessage}`);
+      console.error(`❌ Cleanup batch failed for "${siteName || siteId}": ${errorMessage}`);
+      logger.error('Cleanup batch error', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.stack : error,
+        duration: Date.now() - startTime,
+      });
       
-      // Try to recover the subscription if cleanup is failing
+      // Schedule recovery for failed operations
       this.scheduleSubscriptionRecovery(siteId);
     }
   }
