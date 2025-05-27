@@ -1,6 +1,6 @@
 {
   "name": "@riffcc/lens-node",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "A command-line interface for running your Lens node.",
   "repository": {
     "type": "git",
@@ -46,7 +46,7 @@
     "@libp2p/kad-dht": "^15.1.2",
     "@libp2p/record": "^4.0.6",
     "@riffcc/lens-node": "link:",
-    "@riffcc/lens-sdk": "^0.1.22",
+    "@riffcc/lens-sdk": "^0.1.23",
     "ajv": "^8.17.1",
     "inquirer": "^12.6.1",
     "multiformats": "^13.3.6",
