@@ -1914,6 +1914,16 @@ class SubscriptionSyncManager {
       // Process additions in parallel for maximum speed
       const federationPromises = added.map(async (release) => {
         try {
+          // Skip if this is already federated content to prevent loops
+          if (release.federatedFrom) {
+            logger.debug('Content is already federated, skipping to prevent loop', {
+              releaseId: release.id,
+              originalSource: release.federatedFrom,
+              currentSource: siteId,
+            });
+            return false;
+          }
+          
           // Check for existing release first (optimistic check)
           const existingReleases = await this.localSite.releases.index.search(new SearchRequest({
             query: { id: release.id }
