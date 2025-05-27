@@ -532,7 +532,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
       
       // Monitor subscription changes
-      site.subscriptions.events.addEventListener('change', (evt) => {
+      site.subscriptions.events.addEventListener('change', async (evt) => {
         const addedCount = evt.detail.added?.length || 0;
         const removedCount = evt.detail.removed?.length || 0;
         
@@ -547,6 +547,29 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           addedSites: evt.detail.added?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
           removedSites: evt.detail.removed?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
         });
+        
+        // Set up sync for newly added subscriptions
+        if (addedCount > 0 && evt.detail.added) {
+          try {
+            const syncManager = (lensService as any).syncManager;
+            if (syncManager) {
+              statusManager.showMessage(`🔄 Setting up sync for ${addedCount} new subscription(s) added via UI...`);
+              await syncManager.setupSubscriptionSync(evt.detail.added);
+              statusManager.showMessage(`✅ Real-time sync activated for new subscription(s)`);
+            } else {
+              // Fallback: create new sync manager if none exists
+              statusManager.showMessage(`🔄 Creating sync manager for ${addedCount} new subscription(s)...`);
+              const newSyncManager = await setupSubscriptionSync(client!, site!, lensService!, evt.detail.added);
+              (lensService as any).syncManager = newSyncManager;
+              statusManager.showMessage(`✅ Real-time sync activated for new subscription(s)`);
+            }
+          } catch (syncError) {
+            logError('Failed to set up sync for UI-added subscription', syncError, {
+              addedSites: evt.detail.added?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
+            });
+            statusManager.showMessage(`❌ Failed to set up sync for new subscription(s): ${(syncError as Error).message}`);
+          }
+        }
       });
       
       // Monitor featured releases changes
