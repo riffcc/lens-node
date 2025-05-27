@@ -93,10 +93,27 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     process.on('SIGTERM', () => shutdown('SIGTERM'));
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      const errorMessage = reason instanceof Error ? reason.message : String(reason);
+      
+      // Handle peer:reachable timeouts gracefully without logging as errors
+      if (errorMessage.includes('peer:reachable') || errorMessage.includes('Aborted waiting for event')) {
+        logger.debug('Peer connection timeout (handled gracefully)', {
+          reason: errorMessage,
+          type: 'peer_timeout'
+        });
+        return;
+      }
+      
+      // Log other unhandled rejections
+      logError('Unhandled Promise Rejection', reason instanceof Error ? reason : new Error(String(reason)), {
+        promiseString: promise.toString(),
+      });
+      console.error('Unhandled Rejection:', errorMessage);
     });
+    
     process.on('uncaughtException', (error) => {
-      console.error('Uncaught Exception:', error);
+      logError('Uncaught Exception', error);
+      console.error('Uncaught Exception:', error.message);
     });
 
     try {
@@ -652,6 +669,7 @@ async function handleSubscriptionMenu(lensService: LensService) {
         { name: 'View Current Subscriptions', value: 'view' },
         { name: 'Subscribe to a Site', value: 'subscribe' },
         { name: 'Unsubscribe from a Site', value: 'unsubscribe' },
+        { name: 'Restore Deleted Content', value: 'restore' },
         { name: 'Back to Main Menu', value: 'back' },
       ],
     });
@@ -665,6 +683,9 @@ async function handleSubscriptionMenu(lensService: LensService) {
         break;
       case 'unsubscribe':
         await unsubscribeSite(lensService);
+        break;
+      case 'restore':
+        await restoreDeletedContent(lensService);
         break;
       case 'back':
         return;
@@ -920,6 +941,162 @@ async function unsubscribeSite(lensService: LensService) {
     }
   } catch (error) {
     console.error('Error unsubscribing:', (error as Error).message);
+  }
+}
+
+async function restoreDeletedContent(lensService: LensService) {
+  try {
+    const subscriptions = await lensService.getSubscriptions();
+    
+    if (subscriptions.length === 0) {
+      console.log('\nNo subscriptions found to restore content from.\n');
+      return;
+    }
+
+    const choices = subscriptions.map((sub, index) => ({
+      name: `${sub[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed'} - ${sub[SUBSCRIPTION_SITE_ID_PROPERTY]}`,
+      value: sub,
+    }));
+
+    const { selectedSubscription } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'selectedSubscription',
+        message: 'Select a subscription to restore content from:',
+        choices: [
+          ...choices,
+          new inquirer.Separator(),
+          { name: 'Cancel', value: 'cancel' },
+        ],
+      },
+    ]);
+
+    if (selectedSubscription === 'cancel') {
+      return;
+    }
+
+    const siteId = selectedSubscription[SUBSCRIPTION_SITE_ID_PROPERTY];
+    const siteName = selectedSubscription[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed Lens';
+    
+    console.log(`\n🔄 Checking for restorable content from "${siteName}"...`);
+    
+    try {
+      // Open the subscribed site to get all available content
+      logger.info('Opening subscribed site for content restoration', {
+        siteId,
+        siteName,
+      });
+      
+      const subscribedSite = await lensService.client!.open<Site>(siteId, {
+        args: DEDICATED_SITE_ARGS,
+      });
+      
+      // Get all releases from the subscribed site
+      const availableReleases = await subscribedSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      
+      // Get current local releases
+      const localSite = lensService.siteProgram;
+      if (!localSite) {
+        throw new Error('Local site not available');
+      }
+      
+      const localReleases = await localSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      const localIds = new Set(localReleases.map((release: any) => release.id));
+      
+      // Find releases that exist in the source but not locally
+      const restorableReleases = availableReleases.filter((release: any) => !localIds.has(release.id));
+      
+      if (restorableReleases.length === 0) {
+        console.log(`\n✅ No missing content found. All releases from "${siteName}" are already present locally.\n`);
+        await subscribedSite.close();
+        return;
+      }
+      
+      console.log(`\n📦 Found ${restorableReleases.length} releases that can be restored from "${siteName}"`);
+      console.log(`   Total available: ${availableReleases.length}`);
+      console.log(`   Already present: ${availableReleases.length - restorableReleases.length}`);
+      console.log(`   Missing/Restorable: ${restorableReleases.length}\n`);
+      
+      // Show some examples of what would be restored
+      if (restorableReleases.length > 0) {
+        console.log('Examples of content that would be restored:');
+        const examples = restorableReleases.slice(0, 5);
+        examples.forEach((release: any, index: number) => {
+          const title = release.name || 'Untitled';
+          const truncatedTitle = title.length > 50 ? title.substring(0, 47) + '...' : title;
+          console.log(`   ${index + 1}. ${truncatedTitle}`);
+        });
+        if (restorableReleases.length > 5) {
+          console.log(`   ... and ${restorableReleases.length - 5} more`);
+        }
+        console.log('');
+      }
+      
+      const restoreOptions = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirm',
+          message: `Restore ${restorableReleases.length} missing releases from "${siteName}"?`,
+          default: false,
+        },
+      ]);
+
+      if (!restoreOptions.confirm) {
+        console.log('\n❌ Content restoration cancelled.\n');
+        await subscribedSite.close();
+        return;
+      }
+
+      console.log(`\n🔄 Restoring content from "${siteName}"...`);
+      
+      // Restore content in batches
+      let restoredCount = 0;
+      const batchSize = 10;
+      
+      for (let i = 0; i < restorableReleases.length; i += batchSize) {
+        const batch = restorableReleases.slice(i, i + batchSize);
+        
+        const batchRestoredCount = await federateNewContent(localSite, batch, siteId, siteName, lensService);
+        restoredCount += batchRestoredCount;
+        
+        // Progress indicator
+        const progress = Math.min(i + batchSize, restorableReleases.length);
+        console.log(`   Restored ${progress}/${restorableReleases.length} releases...`);
+        
+        // Small delay between batches
+        if (i + batchSize < restorableReleases.length) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      
+      await subscribedSite.close();
+      
+      console.log(`\n✅ Content restoration completed!`);
+      console.log(`   Successfully restored: ${restoredCount}/${restorableReleases.length} releases`);
+      console.log(`   From: "${siteName}"\n`);
+      
+      logger.info('Content restoration completed', {
+        siteId,
+        siteName,
+        totalAvailable: availableReleases.length,
+        totalRestorable: restorableReleases.length,
+        successfullyRestored: restoredCount,
+      });
+      
+    } catch (error) {
+      logError('Failed to restore content', error, {
+        siteId,
+        siteName,
+      });
+      console.error(`\n❌ Failed to restore content: ${(error as Error).message}\n`);
+    }
+    
+  } catch (error) {
+    console.error('Error in content restoration:', (error as Error).message);
   }
 }
 
@@ -1303,25 +1480,96 @@ async function setupSubscriptionSync(client: Peerbit, localSite: Site, lensServi
         siteName,
       });
       
-      const subscribedSite = await client.open<Site>(siteId, {
-        args: DEDICATED_SITE_ARGS,
-      });
+      // Add timeout and retry logic for opening subscribed sites
+      let subscribedSite: Site | undefined;
+      const maxRetries = 3;
+      let attempt = 0;
+      
+      while (attempt < maxRetries) {
+        try {
+          attempt++;
+          logger.debug(`Opening subscribed site attempt ${attempt}/${maxRetries}`, {
+            siteId,
+            siteName,
+          });
+          
+          subscribedSite = await Promise.race([
+            client.open<Site>(siteId, { args: DEDICATED_SITE_ARGS }),
+            new Promise<never>((_, reject) => 
+              setTimeout(() => reject(new Error('Site open timeout')), 15000)
+            )
+          ]) as Site;
+          
+          logger.info('Successfully opened subscribed site', {
+            siteId,
+            siteName,
+            attempt,
+          });
+          break;
+          
+        } catch (openError) {
+          logger.warn(`Failed to open subscribed site on attempt ${attempt}`, {
+            siteId,
+            siteName,
+            attempt,
+            error: openError instanceof Error ? openError.message : openError,
+          });
+          
+          if (attempt === maxRetries) {
+            throw openError;
+          }
+          
+          // Wait before retry with exponential backoff
+          const waitTime = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+          logger.debug(`Waiting ${waitTime}ms before retry`, { siteId, attempt });
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+      
+      if (!subscribedSite) {
+        throw new Error('Failed to open subscribed site after all retries');
+      }
+      
+      // Check if event listener is already set up to prevent duplicates
+      const existingListenerCount = subscribedSite.releases.events.listenerCount('change');
+      if (existingListenerCount > 0) {
+        logger.debug('Event listener already exists for subscription', {
+          siteId,
+          siteName,
+          existingListeners: existingListenerCount,
+        });
+        console.log(`ℹ️  Real-time sync already active for "${siteName || siteId}"`);
+        return;
+      }
       
       // Set up real-time event listener for this subscription
       subscribedSite.releases.events.addEventListener('change', async (evt: any) => {
         const added = evt.detail.added || [];
         const removed = evt.detail.removed || [];
         
+        logger.info('Subscription change event received', {
+          siteId,
+          siteName,
+          addedCount: added.length,
+          removedCount: removed.length,
+          eventDetail: evt.detail,
+        });
+        
         if (added.length > 0) {
+          console.log(`📥 Received ${added.length} new releases from "${siteName || siteId}"`);
           // Use setImmediate to avoid blocking the event loop
           setImmediate(async () => {
             try {
               const federatedCount = await federateNewContent(localSite, added, siteId, siteName, lensService);
               if (federatedCount > 0) {
                 console.log(`✅ Federated ${federatedCount} new releases from "${siteName || siteId}" in real-time`);
+              } else {
+                console.log(`ℹ️  No new content to federate from "${siteName || siteId}" (already exists locally)`);
               }
             } catch (federationError) {
-              logError('Failed to federate new content in real-time', federationError, {
+              const errorMessage = federationError instanceof Error ? federationError.message : String(federationError);
+              console.error(`❌ Federation failed for "${siteName || siteId}": ${errorMessage}`);
+              logError('Failed to federate new content in real-time', federationError instanceof Error ? federationError : new Error(String(federationError)), {
                 siteId,
                 siteName,
                 addedCount: added.length,
@@ -1331,15 +1579,20 @@ async function setupSubscriptionSync(client: Peerbit, localSite: Site, lensServi
         }
         
         if (removed.length > 0) {
+          console.log(`🗑️  Received ${removed.length} content removals from "${siteName || siteId}"`);
           // Use setImmediate to avoid blocking the event loop
           setImmediate(async () => {
             try {
               const cleanedCount = await cleanupRemovedContent(localSite, removed, siteId, lensService);
               if (cleanedCount > 0) {
                 console.log(`🧹 Cleaned up ${cleanedCount} removed releases from "${siteName || siteId}" in real-time`);
+              } else {
+                console.log(`ℹ️  No federated content to clean up from "${siteName || siteId}"`);
               }
             } catch (cleanupError) {
-              logError('Failed to cleanup removed content in real-time', cleanupError, {
+              const errorMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+              console.error(`❌ Cleanup failed for "${siteName || siteId}": ${errorMessage}`);
+              logError('Failed to cleanup removed content in real-time', cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)), {
                 siteId,
                 siteName,
                 removedCount: removed.length,
