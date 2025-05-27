@@ -20,7 +20,68 @@ import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
 import { dirOption } from './commonOptions.js';
 import { logger, logSubscriptionEvent, logSyncEvent, logPeerEvent, logError } from '../logger.js';
+import { clearLine, cursorTo } from 'readline';
 
+// Status line manager for non-disruptive updates
+class StatusLineManager {
+  private statusLines: Map<string, string> = new Map();
+  private isActive: boolean = false;
+  private lastLineCount: number = 0;
+
+  activate() {
+    this.isActive = true;
+  }
+
+  deactivate() {
+    this.isActive = false;
+    this.clearStatus();
+  }
+
+  updateStatus(key: string, message: string) {
+    if (!this.isActive) {
+      // When TUI is not active, just log normally
+      logger.info(message);
+      return;
+    }
+
+    this.statusLines.set(key, message);
+    this.render();
+  }
+
+  private render() {
+    if (!this.isActive) return;
+
+    // Move cursor to beginning of status area
+    if (this.lastLineCount > 0) {
+      process.stdout.write(`\x1b[${this.lastLineCount}A`);
+    }
+
+    // Clear and rewrite status lines
+    const lines = Array.from(this.statusLines.values());
+    this.lastLineCount = lines.length;
+
+    lines.forEach(line => {
+      clearLine(process.stdout, 0);
+      cursorTo(process.stdout, 0);
+      process.stdout.write(`${line}\n`);
+    });
+  }
+
+  clearStatus() {
+    if (this.lastLineCount > 0) {
+      // Move up and clear all status lines
+      for (let i = 0; i < this.lastLineCount; i++) {
+        process.stdout.write('\x1b[1A');
+        clearLine(process.stdout, 0);
+        cursorTo(process.stdout, 0);
+      }
+      this.lastLineCount = 0;
+    }
+    this.statusLines.clear();
+  }
+}
+
+const statusManager = new StatusLineManager();
 
 type RunCommandArgs = {
   relay?: boolean;
@@ -419,9 +480,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       
       // Monitor when new releases are added
       site!.releases.events.addEventListener('change', (evt) => {
+        const addedCount = evt.detail.added?.length || 0;
+        const removedCount = evt.detail.removed?.length || 0;
+        
+        // Skip logging if nothing changed
+        if (addedCount === 0 && removedCount === 0) {
+          return;
+        }
+        
         logSyncEvent('releases:change', {
-          added: evt.detail.added?.length || 0,
-          removed: evt.detail.removed?.length || 0,
+          added: addedCount,
+          removed: removedCount,
           addedIds: evt.detail.added?.map((doc: any) => doc[ID_PROPERTY]),
           removedIds: evt.detail.removed?.map((doc: any) => doc[ID_PROPERTY]),
         });
@@ -429,9 +498,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       
       // Monitor subscription changes
       site.subscriptions.events.addEventListener('change', (evt) => {
+        const addedCount = evt.detail.added?.length || 0;
+        const removedCount = evt.detail.removed?.length || 0;
+        
+        // Skip logging if nothing changed
+        if (addedCount === 0 && removedCount === 0) {
+          return;
+        }
+        
         logSubscriptionEvent('subscription:change', {
-          added: evt.detail.added?.length || 0,
-          removed: evt.detail.removed?.length || 0,
+          added: addedCount,
+          removed: removedCount,
           addedSites: evt.detail.added?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
           removedSites: evt.detail.removed?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
         });
@@ -439,9 +516,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       
       // Monitor featured releases changes
       site.featuredReleases.events.addEventListener('change', (evt) => {
+        const addedCount = evt.detail.added?.length || 0;
+        const removedCount = evt.detail.removed?.length || 0;
+        
+        // Skip logging if nothing changed
+        if (addedCount === 0 && removedCount === 0) {
+          return;
+        }
+        
         logSyncEvent('featuredReleases:change', {
-          added: evt.detail.added?.length || 0,
-          removed: evt.detail.removed?.length || 0,
+          added: addedCount,
+          removed: removedCount,
         });
       });
       
@@ -995,15 +1080,33 @@ async function restoreDeletedContent(lensService: LensService) {
     console.log(`\n🔄 Checking for restorable content from "${siteName}"...`);
     
     try {
-      // Open the subscribed site to get all available content
-      logger.info('Opening subscribed site for content restoration', {
-        siteId,
-        siteName,
-      });
+      // Check if site is already open in sync manager
+      let subscribedSite: Site | undefined;
+      const syncManager = (lensService as any).syncManager as SubscriptionSyncManager | undefined;
       
-      const subscribedSite = await lensService.client!.open<Site>(siteId, {
-        args: DEDICATED_SITE_ARGS,
-      });
+      if (syncManager) {
+        subscribedSite = syncManager.getOpenSite(siteId);
+        if (subscribedSite) {
+          logger.info('Using already-open site from sync manager for content restoration', {
+            siteId,
+            siteName,
+          });
+        }
+      }
+      
+      // If not already open, open it now
+      if (!subscribedSite) {
+        logger.info('Opening subscribed site for content restoration', {
+          siteId,
+          siteName,
+        });
+        
+        subscribedSite = await lensService.client!.open<Site>(siteId, {
+          args: DEDICATED_SITE_ARGS,
+        });
+      }
+      
+      const shouldCloseAfter = !syncManager?.getOpenSite(siteId); // Only close if we opened it
       
       // Get all releases from the subscribed site
       const availableReleases = await subscribedSite.releases.index.search(new SearchRequest({
@@ -1026,7 +1129,10 @@ async function restoreDeletedContent(lensService: LensService) {
       
       if (restorableReleases.length === 0) {
         console.log(`\n✅ No missing content found. All releases from "${siteName}" are already present locally.\n`);
-        await subscribedSite.close();
+        // Only close if we opened it (not already managed by sync manager)
+        if (shouldCloseAfter) {
+          await subscribedSite.close();
+        }
         return;
       }
       
@@ -1061,7 +1167,10 @@ async function restoreDeletedContent(lensService: LensService) {
 
       if (!restoreOptions.confirm) {
         console.log('\n❌ Content restoration cancelled.\n');
-        await subscribedSite.close();
+        // Only close if we opened it (not already managed by sync manager)
+        if (shouldCloseAfter) {
+          await subscribedSite.close();
+        }
         return;
       }
 
@@ -1087,7 +1196,10 @@ async function restoreDeletedContent(lensService: LensService) {
         }
       }
       
-      await subscribedSite.close();
+      // Only close if we opened it (not already managed by sync manager)
+      if (shouldCloseAfter) {
+        await subscribedSite.close();
+      }
       
       console.log(`\n✅ Content restoration completed!`);
       console.log(`   Successfully restored: ${restoredCount}/${restorableReleases.length} releases`);
@@ -1254,14 +1366,48 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
       throw new Error('Site program not available');
     }
     
-    // Find all releases that were federated from this site
+    // First, try to find federated content using the index
     const allReleases = await site.releases.index.search(new SearchRequest({
-      fetch: 1000
+      fetch: 5000 // Increase limit to catch more
     }));
     
-    const federatedReleases = allReleases.filter((release: any) => 
+    let federatedReleases = allReleases.filter((release: any) => 
       release.federatedFrom === siteId
     );
+    
+    // If we found some federated releases but suspect there might be more,
+    // do a more thorough search using the federatedFrom field directly
+    if (federatedReleases.length > 0 || allReleases.length >= 1000) {
+      logger.info('Performing thorough federated content search', {
+        siteId,
+        initialCount: federatedReleases.length
+      });
+      
+      try {
+        // Search specifically for federated content
+        const federatedSearch = await site.releases.index.search(new SearchRequest({
+          query: { federatedFrom: siteId },
+          fetch: 5000
+        }));
+        
+        // Combine and deduplicate results
+        const federatedIds = new Set(federatedReleases.map(r => r.id));
+        federatedSearch.forEach(release => {
+          if (!federatedIds.has(release.id)) {
+            federatedReleases.push(release);
+          }
+        });
+        
+        logger.info('Thorough search completed', {
+          siteId,
+          finalCount: federatedReleases.length
+        });
+      } catch (searchError) {
+        logger.warn('Thorough federated search failed, using initial results', {
+          error: searchError instanceof Error ? searchError.message : searchError
+        });
+      }
+    }
     
     logger.info('Found federated content to remove', {
       siteId,
@@ -1304,12 +1450,27 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
                 siteId,
               });
             } else {
-              logger.warn('LensService failed to remove federated release', {
+              logger.warn('LensService failed to remove federated release, trying direct deletion', {
                 releaseId: release.id,
                 error: deleteResult?.error || 'Unknown error',
-                deleteResult,
                 siteId,
               });
+              
+              // If LensService fails, try direct deletion as fallback
+              try {
+                await site.releases.del(release.id);
+                removedCount++;
+                logger.info('Successfully removed via direct deletion after LensService failure', {
+                  releaseId: release.id,
+                  siteId,
+                });
+              } catch (fallbackError) {
+                logger.error('Both LensService and direct deletion failed', {
+                  releaseId: release.id,
+                  lensError: deleteResult?.error,
+                  directError: fallbackError instanceof Error ? fallbackError.message : fallbackError,
+                });
+              }
             }
           } else {
             // Try direct deletion from the site
@@ -1354,11 +1515,32 @@ async function removeFederatedContent(lensService: LensService, siteId: string, 
       }
     }
     
+    // Verify removal by checking if any federated content remains
+    const remainingCheck = await site.releases.index.search(new SearchRequest({
+      query: { federatedFrom: siteId },
+      fetch: 100
+    }));
+    
+    if (remainingCheck.length > 0) {
+      logger.warn('Some federated content still remains after removal', {
+        siteId,
+        siteName,
+        remainingCount: remainingCheck.length,
+        attemptedRemoval: federatedReleases.length,
+        successfullyRemoved: removedCount,
+      });
+      
+      console.log(`\n⚠️  Warning: ${remainingCheck.length} federated releases still remain after cleanup.`);
+      console.log(`   This might be due to caching or replication delays.`);
+      console.log(`   Try running the cleanup again or restart the node to clear caches.\n`);
+    }
+    
     logger.info('Federated content removal completed', {
       siteId,
       siteName,
       totalFound: federatedReleases.length,
       successfullyRemoved: removedCount,
+      remaining: remainingCheck.length,
     });
     
     return removedCount;
@@ -1852,6 +2034,11 @@ class SubscriptionSyncManager {
       const added = evt.detail.added || [];
       const removed = evt.detail.removed || [];
       
+      // Skip processing if there's nothing to sync
+      if (added.length === 0 && removed.length === 0) {
+        return;
+      }
+      
       // Update last activity immediately
       const subscription = this.activeSubscriptions.get(siteId);
       if (subscription) {
@@ -1869,7 +2056,7 @@ class SubscriptionSyncManager {
       
       // Handle additions immediately - eventually consistent
       if (added.length > 0) {
-        console.log(`📥 ${added.length} new releases from "${siteName || siteId}" - syncing immediately`);
+        statusManager.updateStatus(`sync-${siteId}`, `📥 ${added.length} new releases from "${siteName || siteId}" - syncing...`);
         // Fire-and-forget for maximum speed, with error recovery
         this.handleContentAddition(added, siteId, siteName).catch(error => {
           logger.warn('Content addition failed, will retry', {
@@ -1888,7 +2075,7 @@ class SubscriptionSyncManager {
       
       // Handle removals immediately - eventually consistent
       if (removed.length > 0) {
-        console.log(`🗑️ ${removed.length} content removals from "${siteName || siteId}" - syncing immediately`);
+        statusManager.updateStatus(`sync-${siteId}`, `🗑️ ${removed.length} content removals from "${siteName || siteId}" - syncing...`);
         // Fire-and-forget for maximum speed, with error recovery
         this.handleContentRemoval(removed, siteId, siteName).catch(error => {
           logger.warn('Content removal failed, will retry', {
@@ -1982,7 +2169,7 @@ class SubscriptionSyncManager {
       const duration = Date.now() - startTime;
       
       if (federatedCount > 0) {
-        console.log(`✅ Federated ${federatedCount}/${added.length} releases from "${siteName || siteId}" in ${duration}ms`);
+        statusManager.updateStatus(`sync-${siteId}`, `✅ Federated ${federatedCount}/${added.length} releases from "${siteName || siteId}" in ${duration}ms`);
       }
       
       logger.info('Content addition completed', {
@@ -2072,7 +2259,7 @@ class SubscriptionSyncManager {
       const duration = Date.now() - startTime;
       
       if (cleanedCount > 0) {
-        console.log(`🧹 Cleaned ${cleanedCount}/${localReleasesToRemove.length} releases from "${siteName || siteId}" in ${duration}ms`);
+        statusManager.updateStatus(`sync-${siteId}`, `🧹 Cleaned ${cleanedCount}/${localReleasesToRemove.length} releases from "${siteName || siteId}" in ${duration}ms`);
       }
       
       logger.info('Content removal completed', {
@@ -2131,13 +2318,14 @@ class SubscriptionSyncManager {
     }, 30000);
   }
 
-  private performHealthCheck(siteId: string) {
+  private async performHealthCheck(siteId: string) {
     const subscription = this.activeSubscriptions.get(siteId);
-    if (!subscription) return;
+    if (!subscription || !subscription.site) return;
     
     const timeSinceActivity = Date.now() - subscription.lastActivity;
     const maxIdleTime = 5 * 60 * 1000; // 5 minutes
     
+    // Check for inactivity
     if (timeSinceActivity > maxIdleTime) {
       logger.warn('Subscription appears inactive, scheduling recovery', {
         siteId,
@@ -2146,6 +2334,41 @@ class SubscriptionSyncManager {
         maxIdleTime,
       });
       this.scheduleSubscriptionRecovery(siteId);
+      return;
+    }
+    
+    // Periodic reconciliation - compare release counts
+    try {
+      const remoteReleases = await subscription.site.releases.index.search(new SearchRequest({
+        fetch: 1 // Just get count
+      }));
+      const remoteCount = remoteReleases.length;
+      
+      // Get local federated releases from this site
+      const localFederatedReleases = await this.localSite.releases.index.search(new SearchRequest({
+        query: { federatedFrom: siteId },
+        fetch: 1
+      }));
+      const localCount = localFederatedReleases.length;
+      
+      // If counts don't match, perform reconciliation
+      if (remoteCount > 0 && localCount < remoteCount) {
+        logger.info('Detected release count mismatch, performing reconciliation', {
+          siteId,
+          siteName: subscription.siteName,
+          remoteCount,
+          localCount,
+          difference: remoteCount - localCount
+        });
+        
+        // Perform partial sync to catch up
+        await this.performInitialSync(subscription.site, siteId, subscription.siteName);
+      }
+    } catch (error) {
+      logger.debug('Health check reconciliation failed', {
+        siteId,
+        error: error instanceof Error ? error.message : error
+      });
     }
   }
 
@@ -2221,6 +2444,12 @@ class SubscriptionSyncManager {
     });
     
     await this.setupSingleSubscription(subscription);
+  }
+
+  // Get an already-open site if available
+  getOpenSite(siteId: string): Site | undefined {
+    const subscription = this.activeSubscriptions.get(siteId);
+    return subscription?.site;
   }
 
   async shutdown() {
