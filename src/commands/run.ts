@@ -212,6 +212,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     });
     
     process.on('uncaughtException', (error) => {
+      // Ignore RPC not initialized errors - these are non-fatal
+      if (error.message === 'Not initialized') {
+        return;
+      }
       logError('Uncaught Exception', error);
       console.error('Uncaught Exception:', error.message);
     });
