@@ -15,14 +15,13 @@ import {
   SUBSCRIPTION_NAME_PROPERTY,
   SUBSCRIPTION_RECURSIVE_PROPERTY,
   ID_PROPERTY,
-  SearchRequest,
 } from '@riffcc/lens-sdk';
+import { SearchRequest } from '@peerbit/document';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
 import { dirOption } from './commonOptions.js';
 import { logger, logSubscriptionEvent, logSyncEvent, logPeerEvent, logError } from '../logger.js';
 import { clearLine, cursorTo } from 'readline';
-import { setupSubscriptionSync, federateNewContent as federateNewContentWrapper, setupSyncMonitoring } from './run-sync-wrapper.js';
 
 // Status line manager for non-disruptive updates
 class StatusLineManager {
@@ -553,10 +552,18 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         // Set up sync for newly added subscriptions
         if (addedCount > 0 && evt.detail.added) {
           try {
-            // Sync is now handled internally by lens-sdk's FederationService
-            statusManager.showMessage(`🔄 Setting up sync for ${addedCount} new subscription(s) added via UI...`);
-            // The FederationService will automatically handle sync when subscriptions are added
-            statusManager.showMessage(`✅ Real-time sync activated for new subscription(s)`);
+            const syncManager = (lensService as any).syncManager;
+            if (syncManager) {
+              statusManager.showMessage(`🔄 Setting up sync for ${addedCount} new subscription(s) added via UI...`);
+              await syncManager.setupSubscriptionSync(evt.detail.added);
+              statusManager.showMessage(`✅ Real-time sync activated for new subscription(s)`);
+            } else {
+              // Fallback: create new sync manager if none exists
+              statusManager.showMessage(`🔄 Creating sync manager for ${addedCount} new subscription(s)...`);
+              const newSyncManager = await setupSubscriptionSync(client!, site!, lensService!, evt.detail.added);
+              (lensService as any).syncManager = newSyncManager;
+              statusManager.showMessage(`✅ Real-time sync activated for new subscription(s)`);
+            }
           } catch (syncError) {
             logError('Failed to set up sync for UI-added subscription', syncError, {
               addedSites: evt.detail.added?.map((sub: any) => sub[SUBSCRIPTION_SITE_ID_PROPERTY]),
@@ -618,8 +625,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         // Set up event-driven real-time sync for each existing subscription
         if (initialSubs.length > 0) {
           statusManager.showMessage(`🔄 Setting up event-driven real-time sync for ${initialSubs.length} subscriptions...`);
-          // Sync is now handled internally by lens-sdk's FederationService
-          await setupSubscriptionSync(client!, site, lensService, initialSubs, statusManager);
+          const syncManager = await setupSubscriptionSync(client!, site, lensService, initialSubs);
+          
+          // Store sync manager for later use with new subscriptions
+          (lensService as any).syncManager = syncManager;
         }
       } catch (error) {
         logError('Failed to load initial subscriptions', error);
@@ -934,7 +943,15 @@ async function subscribeSite(lensService: LensService) {
       });
       
       try {
-        // Sync is now handled internally by lens-sdk's FederationService
+        // Use existing sync manager if available, otherwise create new one
+        const syncManager = (lensService! as any).syncManager;
+        if (syncManager) {
+          await syncManager.setupSubscriptionSync([subscriptionData]);
+        } else {
+          // Fallback to creating new sync manager
+          const newSyncManager = await setupSubscriptionSync(lensService!.client!, lensService!.siteProgram!, lensService!, [subscriptionData]);
+          (lensService! as any).syncManager = newSyncManager;
+        }
         statusManager.showMessage('🔄 Event-driven real-time sync activated for new subscription');
       } catch (syncError) {
         logError('Failed to set up event-driven real-time sync for new subscription', syncError, {
@@ -1124,17 +1141,33 @@ async function restoreDeletedContent(lensService: LensService) {
     statusManager.updateStatus('content-restore', `🔄 Checking for restorable content from "${siteName}"...`);
     
     try {
-      // Always open the site for content restoration
-      logger.info('Opening subscribed site for content restoration', {
-        siteId,
-        siteName,
-      });
+      // Check if site is already open in sync manager
+      let subscribedSite: Site | undefined;
+      const syncManager = (lensService as any).syncManager as SubscriptionSyncManager | undefined;
       
-      const subscribedSite = await lensService.client!.open<Site>(siteId, {
-        args: DEDICATED_SITE_ARGS,
-      });
+      if (syncManager) {
+        subscribedSite = syncManager.getOpenSite(siteId);
+        if (subscribedSite) {
+          logger.info('Using already-open site from sync manager for content restoration', {
+            siteId,
+            siteName,
+          });
+        }
+      }
       
-      const shouldCloseAfter = true; // Always close after we're done
+      // If not already open, open it now
+      if (!subscribedSite) {
+        logger.info('Opening subscribed site for content restoration', {
+          siteId,
+          siteName,
+        });
+        
+        subscribedSite = await lensService.client!.open<Site>(siteId, {
+          args: DEDICATED_SITE_ARGS,
+        });
+      }
+      
+      const shouldCloseAfter = !syncManager?.getOpenSite(siteId); // Only close if we opened it
       
       // Get all releases from the subscribed site
       const availableReleases = await subscribedSite.releases.index.search(new SearchRequest({
@@ -1960,6 +1993,654 @@ async function cleanupRemovedContent(localSite: Site, removedReleases: any[], si
     });
     throw error;
   }
+}
+
+// Event-driven subscription sync manager
+// Remove the local SubscriptionSyncManager class - it's now in lens-sdk
+// class SubscriptionSyncManager {
+  private client: Peerbit;
+  private localSite: Site;
+  private lensService: LensService;
+  private activeSubscriptions = new Map<string, {
+    site: Site;
+    siteName?: string;
+    lastActivity: number;
+    reconnectAttempts: number;
+    healthCheckInterval?: NodeJS.Timeout;
+  }>();
+  private shutdownHandlers: (() => Promise<void>)[] = [];
+
+  constructor(client: Peerbit, localSite: Site, lensService: LensService) {
+    this.client = client;
+    this.localSite = localSite;
+    this.lensService = lensService;
+    
+    // Set up global shutdown handlers
+    const shutdown = async () => {
+      await this.shutdown();
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  }
+
+  async setupSubscriptionSync(subscriptions: any[]) {
+    logger.info('Setting up event-driven real-time subscription sync', {
+      subscriptionCount: subscriptions.length,
+    });
+    
+    // Process subscriptions in parallel for faster startup
+    const setupPromises = subscriptions.map(subscription => 
+      this.setupSingleSubscription(subscription).catch(error => {
+        logger.warn('Failed to setup subscription during parallel init', {
+          siteId: subscription[SUBSCRIPTION_SITE_ID_PROPERTY],
+          error: error instanceof Error ? error.message : error,
+        });
+      })
+    );
+    
+    await Promise.allSettled(setupPromises);
+    
+    statusManager.showMessage(`🔄 Real-time sync active for ${this.activeSubscriptions.size}/${subscriptions.length} subscriptions`);
+  }
+
+  private async setupSingleSubscription(subscription: any) {
+    const siteId = subscription[SUBSCRIPTION_SITE_ID_PROPERTY];
+    const siteName = subscription[SUBSCRIPTION_NAME_PROPERTY];
+    
+    // Skip if already active
+    if (this.activeSubscriptions.has(siteId)) {
+      logger.debug('Subscription already active', { siteId, siteName });
+      return;
+    }
+
+    logger.info('Setting up subscription sync', { siteId, siteName });
+    
+    const maxRetries = 5;
+    let attempt = 0;
+    
+    while (attempt < maxRetries) {
+      try {
+        attempt++;
+        
+        const subscribedSite = await this.openSubscribedSite(siteId, attempt, maxRetries);
+        if (!subscribedSite) continue;
+        
+        // Set up immediate event handling
+        await this.setupEventHandlers(subscribedSite, siteId, siteName);
+        
+        // Store subscription info
+        this.activeSubscriptions.set(siteId, {
+          site: subscribedSite,
+          siteName,
+          lastActivity: Date.now(),
+          reconnectAttempts: 0,
+        });
+        
+        // Perform initial sync
+        await this.performInitialSync(subscribedSite, siteId, siteName);
+        
+        // Set up health monitoring
+        this.setupHealthMonitoring(siteId);
+        
+        statusManager.showMessage(`✅ Subscription sync active: "${siteName || siteId}"`);
+        break;
+        
+      } catch (error) {
+        logger.warn(`Subscription setup attempt ${attempt} failed`, {
+          siteId,
+          siteName,
+          attempt,
+          error: error instanceof Error ? error.message : error,
+        });
+        
+        if (attempt === maxRetries) {
+          logger.error('Failed to setup subscription after all retries', {
+            siteId,
+            siteName,
+            maxRetries,
+          });
+          // Schedule retry in background
+          setTimeout(() => this.retrySubscriptionSetup(subscription), 30000);
+        } else {
+          // Exponential backoff
+          const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 30000);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    }
+  }
+
+  private async openSubscribedSite(siteId: string, attempt: number, maxRetries: number): Promise<Site | null> {
+    try {
+      logger.debug(`Opening subscription site (${attempt}/${maxRetries})`, { siteId });
+      
+      // Race against timeout with aggressive timeout reduction for faster feedback
+      const timeoutMs = Math.max(5000, 15000 - (attempt * 2000));
+      
+      const subscribedSite = await Promise.race([
+        this.client.open<Site>(siteId, { args: DEDICATED_SITE_ARGS }),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Site open timeout')), timeoutMs)
+        )
+      ]) as Site;
+      
+      logger.info('Subscription site opened successfully', {
+        siteId,
+        attempt,
+        timeoutMs,
+      });
+      
+      return subscribedSite;
+      
+    } catch (error) {
+      logger.debug('Failed to open subscription site', {
+        siteId,
+        attempt,
+        error: error instanceof Error ? error.message : error,
+      });
+      return null;
+    }
+  }
+
+  private async setupEventHandlers(subscribedSite: Site, siteId: string, siteName?: string) {
+    // Check if event listener is already set up to prevent duplicates
+    const existingListenerCount = subscribedSite.releases.events.listenerCount('change');
+    if (existingListenerCount > 0) {
+      logger.debug('Event listener already exists for subscription', {
+        siteId,
+        siteName,
+        existingListeners: existingListenerCount,
+      });
+      return;
+    }
+    
+    // Set up immediate event handling - fully event-driven, no delays
+    subscribedSite.releases.events.addEventListener('change', (evt: any) => {
+      const added = evt.detail.added || [];
+      const removed = evt.detail.removed || [];
+      
+      // Skip processing if there's nothing to sync
+      if (added.length === 0 && removed.length === 0) {
+        return;
+      }
+      
+      // Update last activity immediately
+      const subscription = this.activeSubscriptions.get(siteId);
+      if (subscription) {
+        subscription.lastActivity = Date.now();
+        subscription.reconnectAttempts = 0; // Reset on successful activity
+      }
+      
+      logger.info('Real-time subscription event', {
+        siteId,
+        siteName,
+        addedCount: added.length,
+        removedCount: removed.length,
+        timestamp: Date.now(),
+      });
+      
+      // Handle additions immediately - eventually consistent
+      if (added.length > 0) {
+        statusManager.updateStatus(`sync-${siteId}`, `📥 ${added.length} new releases from "${siteName || siteId}" - syncing...`);
+        // Fire-and-forget for maximum speed, with error recovery
+        this.handleContentAddition(added, siteId, siteName).catch(error => {
+          logger.warn('Content addition failed, will retry', {
+            siteId,
+            siteName,
+            error: error instanceof Error ? error.message : error,
+          });
+          // Retry in background for eventual consistency
+          setTimeout(() => {
+            this.handleContentAddition(added, siteId, siteName).catch(() => {
+              logger.error('Content addition retry failed', { siteId, siteName });
+            });
+          }, 5000);
+        });
+      }
+      
+      // Handle removals immediately - eventually consistent
+      if (removed.length > 0) {
+        statusManager.updateStatus(`sync-${siteId}`, `🗑️ ${removed.length} content removals from "${siteName || siteId}" - syncing...`);
+        // Fire-and-forget for maximum speed, with error recovery
+        this.handleContentRemoval(removed, siteId, siteName).catch(error => {
+          logger.warn('Content removal failed, will retry', {
+            siteId,
+            siteName,
+            error: error instanceof Error ? error.message : error,
+          });
+          // Retry in background for eventual consistency
+          setTimeout(() => {
+            this.handleContentRemoval(removed, siteId, siteName).catch(() => {
+              logger.error('Content removal retry failed', { siteId, siteName });
+            });
+          }, 5000);
+        });
+      }
+    });
+  }
+
+  private async handleContentAddition(added: any[], siteId: string, siteName?: string) {
+    const startTime = Date.now();
+    
+    try {
+      // Process additions in parallel for maximum speed
+      const federationPromises = added.map(async (release) => {
+        try {
+          // Skip if this is already federated content to prevent loops
+          if (release.federatedFrom) {
+            logger.debug('Content is already federated, skipping to prevent loop', {
+              releaseId: release.id,
+              originalSource: release.federatedFrom,
+              currentSource: siteId,
+            });
+            return false;
+          }
+          
+          // Check for existing release first (optimistic check)
+          const existingReleases = await this.localSite.releases.index.search(new SearchRequest({
+            query: { id: release.id }
+          }));
+          
+          if (existingReleases.length > 0) {
+            logger.debug('Release already exists, skipping', {
+              releaseId: release.id,
+              siteId,
+            });
+            return false;
+          }
+          
+          // Prepare federated release with metadata
+          const federatedRelease = {
+            ...release,
+            federatedFrom: siteId,
+            federatedAt: new Date().toISOString(),
+            federatedRealtime: true,
+          };
+          
+          // Try LensService first for UI consistency
+          if (this.lensService && typeof this.lensService.addRelease === 'function') {
+            const addResult = await this.lensService.addRelease(federatedRelease);
+            if (addResult && addResult.success) {
+              logger.debug('Federated via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+              return true;
+            }
+          }
+          
+          // Fallback to direct Peerbit insertion for eventual consistency
+          await this.localSite.releases.put(federatedRelease);
+          logger.debug('Federated via direct Peerbit', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            siteId,
+          });
+          return true;
+          
+        } catch (releaseError) {
+          logger.warn('Failed to federate individual release', {
+            releaseId: release.id,
+            error: releaseError instanceof Error ? releaseError.message : releaseError,
+          });
+          return false;
+        }
+      });
+      
+      // Wait for all federation attempts to complete
+      const results = await Promise.allSettled(federationPromises);
+      const federatedCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+      const duration = Date.now() - startTime;
+      
+      if (federatedCount > 0) {
+        statusManager.updateStatus(`sync-${siteId}`, `✅ Federated ${federatedCount}/${added.length} releases from "${siteName || siteId}" in ${duration}ms`);
+      }
+      
+      logger.info('Content addition completed', {
+        siteId,
+        siteName,
+        totalAdded: added.length,
+        federatedCount,
+        duration,
+        successRate: ((federatedCount / added.length) * 100).toFixed(1),
+      });
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Federation batch failed for "${siteName || siteId}": ${errorMessage}`);
+      logger.error('Federation batch error', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.stack : error,
+        duration: Date.now() - startTime,
+      });
+      
+      // Schedule recovery for failed operations
+      this.scheduleSubscriptionRecovery(siteId);
+    }
+  }
+
+  private async handleContentRemoval(removed: any[], siteId: string, siteName?: string) {
+    const startTime = Date.now();
+    
+    try {
+      // Get all local releases that were federated from this site
+      const allLocalReleases = await this.localSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      const localFederatedReleases = allLocalReleases.filter((release: any) => 
+        (release as any).federatedFrom === siteId
+      );
+      
+      // Find which removed releases exist locally
+      const removedIds = new Set(removed.map((release: any) => release.id));
+      const localReleasesToRemove = localFederatedReleases.filter((release: any) => 
+        removedIds.has(release.id)
+      );
+      
+      if (localReleasesToRemove.length === 0) {
+        logger.debug('No federated content to clean up', { siteId, siteName, removedCount: removed.length });
+        return;
+      }
+      
+      // Process removals in parallel for maximum speed
+      const removalPromises = localReleasesToRemove.map(async (release) => {
+        try {
+          // Try LensService first for UI consistency
+          if (this.lensService && typeof this.lensService.deleteRelease === 'function') {
+            const deleteResult = await this.lensService.deleteRelease({ id: release.id });
+            if (deleteResult && deleteResult.success) {
+              logger.debug('Removed via LensService', {
+                releaseId: release.id,
+                title: release.name || 'Untitled',
+                siteId,
+              });
+              return true;
+            }
+          }
+          
+          // Fallback to direct Peerbit deletion for eventual consistency
+          await this.localSite.releases.del(release.id);
+          logger.debug('Removed via direct Peerbit', {
+            releaseId: release.id,
+            title: release.name || 'Untitled',
+            siteId,
+          });
+          return true;
+          
+        } catch (removalError) {
+          logger.warn('Failed to remove individual release', {
+            releaseId: release.id,
+            error: removalError instanceof Error ? removalError.message : removalError,
+          });
+          return false;
+        }
+      });
+      
+      // Wait for all removal attempts to complete
+      const results = await Promise.allSettled(removalPromises);
+      const cleanedCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+      const duration = Date.now() - startTime;
+      
+      if (cleanedCount > 0) {
+        statusManager.updateStatus(`sync-${siteId}`, `🧹 Cleaned ${cleanedCount}/${localReleasesToRemove.length} releases from "${siteName || siteId}" in ${duration}ms`);
+      }
+      
+      logger.info('Content removal completed', {
+        siteId,
+        siteName,
+        totalRemoved: removed.length,
+        localReleasesToRemove: localReleasesToRemove.length,
+        cleanedCount,
+        duration,
+        successRate: localReleasesToRemove.length > 0 ? ((cleanedCount / localReleasesToRemove.length) * 100).toFixed(1) : '100',
+      });
+      
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Cleanup batch failed for "${siteName || siteId}": ${errorMessage}`);
+      logger.error('Cleanup batch error', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.stack : error,
+        duration: Date.now() - startTime,
+      });
+      
+      // Schedule recovery for failed operations
+      this.scheduleSubscriptionRecovery(siteId);
+    }
+  }
+
+  private async performInitialSync(subscribedSite: Site, siteId: string, siteName?: string) {
+    try {
+      const currentReleases = await subscribedSite.releases.index.search(new SearchRequest({
+        fetch: 1000
+      }));
+      
+      if (currentReleases.length > 0) {
+        const federatedCount = await federateNewContent(this.localSite, currentReleases, siteId, siteName, this.lensService);
+        if (federatedCount > 0) {
+          statusManager.showMessage(`📦 Initial sync: ${federatedCount} releases from "${siteName || siteId}"`);
+        }
+      }
+    } catch (error) {
+      logger.warn('Initial sync failed', {
+        siteId,
+        siteName,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private setupHealthMonitoring(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    // Health check every 30 seconds
+    subscription.healthCheckInterval = setInterval(() => {
+      this.performHealthCheck(siteId);
+    }, 30000);
+  }
+
+  private async performHealthCheck(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription || !subscription.site) return;
+    
+    const timeSinceActivity = Date.now() - subscription.lastActivity;
+    const maxIdleTime = 5 * 60 * 1000; // 5 minutes
+    
+    // Check for inactivity
+    if (timeSinceActivity > maxIdleTime) {
+      logger.warn('Subscription appears inactive, scheduling recovery', {
+        siteId,
+        siteName: subscription.siteName,
+        timeSinceActivity,
+        maxIdleTime,
+      });
+      this.scheduleSubscriptionRecovery(siteId);
+      return;
+    }
+    
+    // Periodic reconciliation - compare release counts
+    try {
+      const remoteReleases = await subscription.site.releases.index.search(new SearchRequest({
+        fetch: 1 // Just get count
+      }));
+      const remoteCount = remoteReleases.length;
+      
+      // Get local federated releases from this site
+      const localFederatedReleases = await this.localSite.releases.index.search(new SearchRequest({
+        query: { federatedFrom: siteId },
+        fetch: 1
+      }));
+      const localCount = localFederatedReleases.length;
+      
+      // If counts don't match, perform reconciliation
+      if (remoteCount > 0 && localCount < remoteCount) {
+        logger.info('Detected release count mismatch, performing reconciliation', {
+          siteId,
+          siteName: subscription.siteName,
+          remoteCount,
+          localCount,
+          difference: remoteCount - localCount
+        });
+        
+        // Perform partial sync to catch up
+        await this.performInitialSync(subscription.site, siteId, subscription.siteName);
+      }
+    } catch (error) {
+      logger.debug('Health check reconciliation failed', {
+        siteId,
+        error: error instanceof Error ? error.message : error
+      });
+    }
+  }
+
+  private scheduleSubscriptionRecovery(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    subscription.reconnectAttempts++;
+    
+    // Exponential backoff for recovery attempts
+    const backoffTime = Math.min(1000 * Math.pow(2, subscription.reconnectAttempts - 1), 60000);
+    
+    logger.info('Scheduling subscription recovery', {
+      siteId,
+      siteName: subscription.siteName,
+      attempt: subscription.reconnectAttempts,
+      backoffTime,
+    });
+    
+    setTimeout(async () => {
+      try {
+        await this.recoverSubscription(siteId);
+      } catch (error) {
+        logger.error('Subscription recovery failed', {
+          siteId,
+          error: error instanceof Error ? error.message : error,
+        });
+      }
+    }, backoffTime);
+  }
+
+  private async recoverSubscription(siteId: string) {
+    const subscription = this.activeSubscriptions.get(siteId);
+    if (!subscription) return;
+    
+    logger.info('Attempting subscription recovery', {
+      siteId,
+      siteName: subscription.siteName,
+      attempt: subscription.reconnectAttempts,
+    });
+    
+    try {
+      // Close old connection
+      await subscription.site.close().catch(() => {});
+      
+      // Clear health check
+      if (subscription.healthCheckInterval) {
+        clearInterval(subscription.healthCheckInterval);
+      }
+      
+      // Remove from active subscriptions
+      this.activeSubscriptions.delete(siteId);
+      
+      // Retry setup
+      const subscriptionData = {
+        [SUBSCRIPTION_SITE_ID_PROPERTY]: siteId,
+        [SUBSCRIPTION_NAME_PROPERTY]: subscription.siteName,
+      };
+      
+      await this.setupSingleSubscription(subscriptionData);
+      
+    } catch (error) {
+      logger.error('Subscription recovery failed', {
+        siteId,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private async retrySubscriptionSetup(subscription: any) {
+    logger.info('Retrying subscription setup in background', {
+      siteId: subscription[SUBSCRIPTION_SITE_ID_PROPERTY],
+    });
+    
+    await this.setupSingleSubscription(subscription);
+  }
+
+  // Get an already-open site if available
+  getOpenSite(siteId: string): Site | undefined {
+    const subscription = this.activeSubscriptions.get(siteId);
+    return subscription?.site;
+  }
+
+  async shutdown() {
+    logger.info('Shutting down subscription sync manager');
+    
+    const shutdownPromises = Array.from(this.activeSubscriptions.entries()).map(async ([siteId, subscription]) => {
+      try {
+        if (subscription.healthCheckInterval) {
+          clearInterval(subscription.healthCheckInterval);
+        }
+        await subscription.site.close();
+      } catch (error) {
+        logger.debug('Error closing subscription during shutdown', { siteId });
+      }
+    });
+    
+    await Promise.allSettled(shutdownPromises);
+    this.activeSubscriptions.clear();
+  }
+}
+
+// Set up real-time sync for all existing subscriptions
+async function setupSubscriptionSync(client: Peerbit, localSite: Site, lensService: LensService, subscriptions: any[]) {
+  const syncManager = new SubscriptionSyncManager(client, localSite, lensService);
+  await syncManager.setupSubscriptionSync(subscriptions);
+  return syncManager;
+}
+
+// Set up comprehensive monitoring for sync events
+function setupSyncMonitoring(site: Site, lensService: LensService) {
+  logger.info('Setting up sync monitoring');
+  
+  // Get reference to the client for peer information
+  const client = lensService.client;
+  
+  // Monitor releases store events
+  site.releases.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('releases:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Monitor releases store sync events
+  // Note: Specific replication events may not be available in current version
+  
+  // Monitor featured releases store events
+  site.featuredReleases.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('featuredReleases:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Monitor featured releases store sync events
+  // Note: Specific replication events may not be available in current version
+  
+  // Monitor subscriptions store events
+  site.subscriptions.events.addEventListener('change', (evt: any) => {
+    logSyncEvent('subscriptions:change', {
+      operation: evt.detail?.operation,
+      entries: evt.detail?.entries?.length || 0,
+    });
+  });
+  
+  // Real-time event-driven sync is now handled above - no periodic polling needed
 }
 
 export default runCommand;
