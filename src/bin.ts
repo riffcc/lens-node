@@ -5,16 +5,12 @@ import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
 import setupCommand from './commands/setup.js';
 import importCommand from './commands/import.js';
-import { followCommand } from './commands/follow.js';
-import { unfollowCommand } from './commands/unfollow.js';
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
   .command(setupCommand)
   .command(runCommand)
   .command(importCommand)
-  .command(followCommand)
-  .command(unfollowCommand)
   .demandCommand(1, 'A command must be specified.')
   .strict()
   .help()
