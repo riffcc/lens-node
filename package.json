@@ -34,24 +34,23 @@
   },
   "packageManager": "pnpm@10.6.3",
   "dependencies": {
-    "@inquirer/confirm": "^5.1.10",
-    "@inquirer/input": "^4.1.10",
-    "@inquirer/prompts": "^7.5.1",
-    "@riffcc/lens-node": "link:",
-    "@riffcc/lens-sdk": "^0.1.21",
+    "@inquirer/confirm": "^5.1.12",
+    "@inquirer/input": "^4.1.12",
+    "@inquirer/prompts": "^7.5.3",
+    "@riffcc/lens-sdk": "^0.1.23",
     "ajv": "^8.17.1",
-    "inquirer": "^12.6.1",
-    "multiformats": "^13.3.6",
-    "peerbit": "^4.1.36",
+    "inquirer": "^12.6.3",
+    "multiformats": "^13.3.7",
+    "peerbit": "^4.1.40",
     "winston": "^3.17.0",
     "winston-daily-rotate-file": "^5.0.0",
     "yargs": "^17.7.2"
   },
   "devDependencies": {
-    "@types/node": "^22.15.18",
+    "@types/node": "^22.15.33",
     "@types/yargs": "^17.0.33",
     "rimraf": "^6.0.1",
-    "tsx": "^4.19.4",
+    "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   },
   "pnpm": {
