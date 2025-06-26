@@ -4,128 +4,126 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-// Determine log directory based on OS and permissions
+// (getLogDirectory function remains the same)
 function getLogDirectory(): string {
-  const defaultLogDir = '/var/log';
+  const appName = 'rifflens';
+  const systemLogDir = path.join('/var/log', appName);
   const userLogDir = path.join(os.homedir(), '.lens-node', 'logs');
-  
-  // Try to use /var/log if we have write permissions
+
   try {
-    fs.accessSync(defaultLogDir, fs.constants.W_OK);
-    return defaultLogDir;
+    if (!fs.existsSync(systemLogDir)) {
+      fs.mkdirSync(systemLogDir, { recursive: true });
+    }
+    fs.accessSync(systemLogDir, fs.constants.W_OK);
+    console.log(`Logging to system directory: ${systemLogDir}`);
+    return systemLogDir;
   } catch {
-    // Fallback to user directory
-    fs.mkdirSync(userLogDir, { recursive: true });
+    if (!fs.existsSync(userLogDir)) {
+      fs.mkdirSync(userLogDir, { recursive: true });
+    }
+    console.log(`Could not write to /var/log. Logging to user directory: ${userLogDir}`);
     return userLogDir;
   }
 }
 
-const logDir = getLogDirectory();
-const logFile = path.join(logDir, 'rifflens.log');
 
-// Create custom format
-const customFormat = winston.format.combine(
+const logDir = getLogDirectory();
+const logFile = path.join(logDir, 'rifflens-latest.log');
+
+// FIX: Define the printf function once to be reused.
+const myPrintf = winston.format.printf(({ timestamp, level, message, stack, ...metadata }) => {
+  let msg = `${timestamp} [${level}] ${message}`; // No need for .toUpperCase(), colorize handles it.
+
+  if (Object.keys(metadata).length > 0) {
+    msg += `\n${JSON.stringify(metadata, null, 2)}`;
+  }
+  
+  if (stack) {
+    msg += `\n${stack}`;
+  }
+  
+  return msg;
+});
+
+// FIX: Create a dedicated format for file transports.
+const fileFormat = winston.format.combine(
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
   winston.format.errors({ stack: true }),
   winston.format.splat(),
-  winston.format.printf(({ timestamp, level, message, ...metadata }) => {
-    let msg = `${timestamp} [${level.toUpperCase()}] ${message}`;
-    
-    // Add metadata if present
-    if (Object.keys(metadata).length > 0) {
-      // Filter out error stack from metadata to avoid duplication
-      const { stack, ...cleanMetadata } = metadata;
-      if (Object.keys(cleanMetadata).length > 0) {
-        msg += ` ${JSON.stringify(cleanMetadata)}`;
-      }
-      if (stack) {
-        msg += `\n${stack}`;
-      }
-    }
-    
-    return msg;
-  })
+  myPrintf // Use the reusable printf
 );
+
+// FIX: Create a dedicated format for the console transport.
+const consoleFormat = winston.format.combine(
+  winston.format.colorize(), // This is the key difference
+  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+  winston.format.errors({ stack: true }),
+  winston.format.splat(),
+  myPrintf // Use the reusable printf
+);
+
 
 // Configure daily rotate transport
 const dailyRotateTransport = new DailyRotateFile({
   filename: path.join(logDir, 'rifflens-%DATE%.log'),
   datePattern: 'YYYY-MM-DD',
+  zippedArchive: true,
   maxSize: '20m',
   maxFiles: '14d',
-  format: customFormat,
 });
 
-// Create a symlink to the latest log file
-dailyRotateTransport.on('new', (newFilename) => {
+// (symlink logic remains the same)
+dailyRotateTransport.on('rotate', (oldFilename, newFilename) => {
   try {
-    // Remove existing symlink if it exists
     if (fs.existsSync(logFile)) {
       fs.unlinkSync(logFile);
     }
-    // Create new symlink
-    fs.symlinkSync(newFilename, logFile);
+    fs.symlinkSync(newFilename, logFile, 'file');
   } catch (error) {
-    // Ignore symlink errors (might not have permissions)
+    console.error('Could not create symlink for log file.', error);
   }
 });
 
 // Create logger instance
 export const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
-  format: customFormat,
+  // FIX: Set the default format to the file format.
+  format: fileFormat,
   transports: [
     // Console transport
     new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        customFormat
-      ),
+      // FIX: Use the explicit format we created for the console.
+      format: consoleFormat,
     }),
     // File transport with rotation
     dailyRotateTransport,
   ],
+  // (exception/rejection handlers remain the same)
+  exceptionHandlers: [
+    new winston.transports.File({ filename: path.join(logDir, 'exceptions.log') })
+  ],
+  rejectionHandlers: [
+    new winston.transports.File({ filename: path.join(logDir, 'rejections.log') })
+  ],
+  exitOnError: false, 
 });
 
-// Log startup information
-logger.info('Lens Node logger initialized', {
-  logDirectory: logDir,
-  logFile: logFile,
-  pid: process.pid,
-  nodeVersion: process.version,
-});
 
-// Helper functions for structured logging
+// (Helper functions remain the same)
 export function logSubscriptionEvent(event: string, data: any) {
-  logger.info(`Subscription Event: ${event}`, {
-    event,
-    ...data,
-    timestamp: new Date().toISOString(),
-  });
+  logger.info(`Subscription Event: ${event}`, { event, ...data });
 }
 
 export function logSyncEvent(event: string, data: any) {
-  logger.info(`Sync Event: ${event}`, {
-    event,
-    ...data,
-    timestamp: new Date().toISOString(),
-  });
+  logger.info(`Sync Event: ${event}`, { event, ...data });
 }
 
 export function logPeerEvent(event: string, data: any) {
-  logger.debug(`Peer Event: ${event}`, {
-    event,
-    ...data,
-    timestamp: new Date().toISOString(),
-  });
+  logger.debug(`Peer Event: ${event}`, { event, ...data });
 }
 
 export function logError(message: string, error: any, context?: any) {
-  logger.error(message, {
-    error: error?.message || error,
-    stack: error?.stack,
-    ...context,
-  });
+  logger.error(message, { error, ...context });
 }
 
 export default logger;

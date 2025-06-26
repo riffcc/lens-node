@@ -4,6 +4,7 @@ import { Peerbit } from 'peerbit';
 import { ADMIN_SITE_ARGS, Site } from '@riffcc/lens-sdk';
 import { GlobalOptions } from '../types.js';
 import { dirOption } from './commonOptions.js';
+import { logError } from '../logger.js';
 
 const setupCommand: CommandModule<{}, GlobalOptions> = {
   command: 'setup',
@@ -40,7 +41,7 @@ const setupCommand: CommandModule<{}, GlobalOptions> = {
       await client.stop();
       process.exit(0);
     } catch (e) {
-      console.error(`Error during setup: ${(e as Error).message}`);
+      logError('Error on setup', e);
       process.exit(1);
     }
   }

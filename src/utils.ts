@@ -92,7 +92,7 @@ export function logOperationSuccess(props: {
   finalMessage?: string
 }) {
   console.log(props.startMessage);
-  console.log('--------------------------------------------------');
+  console.log('-'.repeat(50));
   console.log(`Node Directory: ${props.directory}`);
   if (props.configFilePath) {
     console.log(`Configuration saved to: ${props.configFilePath}`);
@@ -103,7 +103,7 @@ export function logOperationSuccess(props: {
   if (props.listeningOn) {
     console.log(`Listening on: ${JSON.stringify(props.listeningOn, null, 2)}`);
   }
-  console.log('--------------------------------------------------');
+  console.log('-'.repeat(50));
   if (props.finalMessage) {
     console.log(props.finalMessage);
   }
