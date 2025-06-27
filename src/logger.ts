@@ -15,13 +15,11 @@ function getLogDirectory(): string {
       fs.mkdirSync(systemLogDir, { recursive: true });
     }
     fs.accessSync(systemLogDir, fs.constants.W_OK);
-    console.log(`Logging to system directory: ${systemLogDir}`);
     return systemLogDir;
   } catch {
     if (!fs.existsSync(userLogDir)) {
       fs.mkdirSync(userLogDir, { recursive: true });
     }
-    console.log(`Could not write to /var/log. Logging to user directory: ${userLogDir}`);
     return userLogDir;
   }
 }
