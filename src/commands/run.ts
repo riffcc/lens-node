@@ -5,8 +5,6 @@ import type { CommandModule } from 'yargs';
 import { GlobalOptions } from '../types.js';
 import { logOperationSuccess, readConfig, saveConfig } from '../utils.js';
 import {
-  DEDICATED_SITE_ARGS, 
-  ADMIN_SITE_ARGS,
   LensService,
   SITE_ADDRESS_PROPERTY,
   SUBSCRIPTION_NAME_PROPERTY,
@@ -186,7 +184,15 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       lensService = new LensService({ client, debug: Boolean(process.env.DEBUG) });
       
       await lensService.openSite(siteConfig.address, {
-        siteArgs: onlyReplicate ? DEDICATED_SITE_ARGS : ADMIN_SITE_ARGS,
+        siteArgs: {
+          releasesArgs: { replicate: { factor: 1 } },
+          featuredReleasesArgs: { replicate: { factor: 1 } },
+          contentCategoriesArgs: { replicate: { factor: 1 } },
+          subscriptionsArgs: { replicate: { factor: 1 } },
+          blockedContentArgs: { replicate: { factor: 1 } },
+          membersArg: { replicate: { factor: 1 } },
+          administratorsArgs: { replicate: { factor: 1 } },
+        },
         federate: true,
       })
       
@@ -289,16 +295,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
                 });
 
                 try {
-                  logger.info('Authorizing account', {
-                    publicKey: stringPubkicKey,
-                    accountType: accountType === 1 ? 'Member' : 'Admin',
-                  });
                   await lensService.siteProgram!.authorise(accountType, stringPubkicKey);
                   logger.info('Account authorized successfully', {
                     publicKey: stringPubkicKey,
                     accountType: accountType === 1 ? 'Member' : 'Admin',
                   });
-                  console.log('Account authorized successfully.');
                 } catch (error) {
                   logError('Error authorizing account', error, {
                     publicKey: stringPubkicKey,
