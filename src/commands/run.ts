@@ -19,7 +19,7 @@ import { logger, logPeerEvent, logError, logSubscriptionEvent } from '../logger.
 
 type RunCommandArgs = {
   relay?: boolean;
-  domains?: string[];
+  domain?: string[];
   listenPort: number;
   onlyReplicate?: boolean;
 };
@@ -37,6 +37,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       })
       .option('domain', {
         type: 'string',
+        array: true,
         description: 'Domain to announce for libp2p configuration',
       })
       .option('listenPort', {
@@ -120,15 +121,14 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       libp2pConfig = {
         addresses: {
           announce: domain ?
-            [
-              `/dns4/${domain}/tcp/4002`,
-              `/dns4/${domain}/tcp/4003/wss`,
-            ] :
+            domain.flatMap(d => [
+              `/dns4/${d}/tcp/4002`,
+              `/dns4/${d}/tcp/4003/wss`,
+            ]) :
             undefined,
           listen: [
             `/ip4/${bindHost}/tcp/${listenPort}`,
-            `/ip4/${bindHost}/tcp/${listenPort !== 0 ? listenPort + 1 : listenPort
-            }/ws`,
+            `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
           ],
         },
       };
@@ -185,14 +185,12 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logger.info('Initializing LensService...');
       lensService = new LensService({ client, debug: Boolean(process.env.DEBUG) });
       
-      logger.info(`Opening site with address :${siteConfig.address}`);
-
       await lensService.openSite(siteConfig.address, {
         siteArgs: onlyReplicate ? DEDICATED_SITE_ARGS : ADMIN_SITE_ARGS,
         federate: true,
       })
       
-      logger.info('LensService configured');
+      logger.info('LensService configured.');
 
       logOperationSuccess({
         startMessage: 'Lens Node is running. Press Ctrl+C to stop OR use the menu below.',
