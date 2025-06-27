@@ -59,9 +59,6 @@
       "better-sqlite3",
       "classic-level",
       "esbuild"
-    ],
-    "overrides": {
-      "@multiformats/multiaddr": "12.5.1"
-    }
+    ]
   }
 }
