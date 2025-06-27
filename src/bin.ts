@@ -5,6 +5,14 @@ import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
 import setupCommand from './commands/setup.js';
 import importCommand from './commands/import.js';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const packageJsonPath = path.resolve(__dirname, '../package.json');
+const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 
 yargs(hideBin(process.argv))
   .scriptName('lens-node')
@@ -15,7 +23,7 @@ yargs(hideBin(process.argv))
   .strict()
   .help()
   .alias('h', 'help')
-  .version()
+  .version(packageJson.version)
   .alias('v', 'version')
   .fail((
     msg: any,
