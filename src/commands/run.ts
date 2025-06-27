@@ -192,13 +192,20 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       
       logger.info('LensService configured.');
 
+      let listeningOn: string[] = [];
+      try {
+        listeningOn = client.getMultiaddrs().map(m => m.toString());
+      } catch (error) {
+        logError('Error getting multiaddrs', error);
+      }
+
       logOperationSuccess({
         startMessage: 'Lens Node is running. Press Ctrl+C to stop OR use the menu below.',
         directory: dir,
         peerId: await lensService.getPeerId(),
         publicKey: await lensService.getPublicKey(),
         siteAddress,
-        listeningOn: client.getMultiaddrs().map(m => m.toString()),
+        listeningOn,
       });
 
       // Start periodic sync status logging
