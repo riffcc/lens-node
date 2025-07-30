@@ -17,19 +17,19 @@
     "peerbit"
   ],
   "type": "module",
-  "main": "dist/bin.js",
-  "types": "dist/types/bin.d.ts",
+  "main": "dist/cli/bin.js",
+  "types": "dist/cli/types/bin.d.ts",
   "bin": {
-    "lens-node": "./dist/bin.js"
+    "lens-node": "./dist/cli/bin.js"
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "dev": "tsx watch src/bin.ts",
-    "build": "rimraf dist && tsc && chmod +x dist/bin.js",
+    "dev": "tsx watch src/cli/bin.ts",
+    "build": "rimraf dist && tsc && chmod +x dist/cli/bin.js",
     "prepublishOnly": "npm run build",
-    "start": "node dist/bin.js",
+    "start": "node dist/cli/bin.js",
     "release": "pnpm build && (git commit -a -m 'version' || true) && pnpm publish"
   },
   "packageManager": "pnpm@10.6.3",
