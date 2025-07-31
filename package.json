@@ -37,7 +37,7 @@
     "@inquirer/confirm": "^5.1.12",
     "@inquirer/input": "^4.1.12",
     "@inquirer/prompts": "^7.5.3",
-    "@riffcc/lens-sdk": "^0.1.25",
+    "@riffcc/lens-sdk": "^0.1.32",
     "ajv": "^8.17.1",
     "axios": "^1.10.0",
     "cors": "^2.8.5",
