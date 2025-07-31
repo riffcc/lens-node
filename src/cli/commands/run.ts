@@ -1,18 +1,15 @@
 import inquirer from 'inquirer';
-import { select } from '@inquirer/prompts';
+import { input, select } from '@inquirer/prompts';
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions } from '../types.js';
 import { logOperationSuccess, readConfig, saveConfig } from '../utils.js';
-import {
-  LensService,
-  SITE_ADDRESS_PROPERTY,
-  SUBSCRIPTION_NAME_PROPERTY,
-} from '@riffcc/lens-sdk';
+import { LensService } from '@riffcc/lens-sdk';
 import { DEFAULT_LISTEN_PORT_LIBP2P } from '../constants.js';
 import fs from 'node:fs';
 import { dirOption } from './commonOptions.js';
 import { logger, logPeerEvent, logError, logSubscriptionEvent } from '../logger.js';
+import { startServer } from '../../api/server.js';
 
 
 type RunCommandArgs = {
@@ -48,7 +45,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         description: 'Run the node in replicator mode',
       }),
   handler: async (argv) => {
-    let client: Peerbit | undefined;
+    let peerbit: Peerbit | undefined;
     let lensService: LensService | undefined;
     let isShuttingDown = false;
 
@@ -62,12 +59,13 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         if (lensService) {
           await lensService.stop();
         }
-        if (client) {
-          await client.stop();
+        if (peerbit) {
+          await peerbit.stop();
           logger.info('Peerbit client closed succesfully')
         }
         logger.info('Cleanup finished');
-      } catch (error) {
+      } catch (e: unknown) { // --- FIX #1: Use the improved logger here ---
+        const error = e instanceof Error ? e : new Error(String(e));
         logError('Error during shutdown', error);
       } finally {
         process.exit(0);
@@ -89,7 +87,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       const { dir, onlyReplicate } = argv;
       let siteAddress = process.env.SITE_ADDRESS;
       const bootstrappers = process.env.BOOTSTRAPPERS;
-      
+
       // Read configuration
       if (siteAddress && onlyReplicate) {
         logger.info(`Using bootstrapped site address ${siteAddress}, resetting the config..`);
@@ -137,42 +135,42 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         relay: argv.relay,
         libp2pConfig: JSON.stringify(libp2pConfig, null, 2),
       });
-      
-      client = await Peerbit.create({
+
+      peerbit = await Peerbit.create({
         directory: dir,
         relay: argv.relay,
         libp2p: libp2pConfig,
       });
-      
+
       logger.info('Peerbit client created successfully');
-      
+
       // Add peer connection event listeners
-      client.libp2p.addEventListener('peer:connect', (evt) => {
+      peerbit.libp2p.addEventListener('peer:connect', (evt) => {
         logPeerEvent('peer:connect', { peerId: evt.detail.toString() });
       });
-      
-      client.libp2p.addEventListener('peer:disconnect', (evt) => {
+
+      peerbit.libp2p.addEventListener('peer:disconnect', (evt) => {
         logPeerEvent('peer:disconnect', { peerId: evt.detail.toString() });
       });
 
       if (bootstrappers) {
         const bootstrappersList = bootstrappers.split(',').map(b => b.trim());
-        logger.info('Dialing bootstrappers', { 
+        logger.info('Dialing bootstrappers', {
           bootstrappers: bootstrappersList,
           count: bootstrappersList.length,
         });
-        
-        const promises = bootstrappersList.map((b) => client?.dial(b));
+
+        const promises = bootstrappersList.map((b) => peerbit?.dial(b));
         const dialingResult = await Promise.allSettled(promises);
-        
+
         const successful = dialingResult.filter(x => x.status === 'fulfilled').length;
         const failed = dialingResult.filter(x => x.status === 'rejected');
-        
+
         logger.info('Bootstrapper dialing complete', {
           successful,
           failed: failed.length,
           total: dialingResult.length,
-          failures: failed.map((f, i) => ({ 
+          failures: failed.map((f, i) => ({
             bootstrapper: bootstrappersList[i],
             error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
           })),
@@ -181,26 +179,15 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Initialize LensService
       logger.info('Initializing LensService...');
-      lensService = new LensService({ client, debug: Boolean(process.env.DEBUG) });
-      
-      await lensService.openSite(siteConfig.address, {
-        siteArgs: {
-          releasesArgs: { replicate: { factor: 1 } },
-          featuredReleasesArgs: { replicate: { factor: 1 } },
-          contentCategoriesArgs: { replicate: { factor: 1 } },
-          subscriptionsArgs: { replicate: { factor: 1 } },
-          blockedContentArgs: { replicate: { factor: 1 } },
-          membersArg: { replicate: { factor: 1 } },
-          administratorsArgs: { replicate: { factor: 1 } },
-        },
-        federate: true,
-      })
-      
-      logger.info('LensService configured.');
+      lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
+      await lensService.openSite(siteConfig.address);
+      logger.info('LensService configured.');
+      startServer({ lensService });
+      logger.info('Lens API REST up.');
       let listeningOn: string[] = [];
       try {
-        listeningOn = client.getMultiaddrs().map(m => m.toString());
+        listeningOn = peerbit.getMultiaddrs().map(m => m.toString());
       } catch (error) {
         logError('Error getting multiaddrs', error);
       }
@@ -208,8 +195,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logOperationSuccess({
         startMessage: 'Lens Node is running. Press Ctrl+C to stop OR use the menu below.',
         directory: dir,
-        peerId: await lensService.getPeerId(),
-        publicKey: await lensService.getPublicKey(),
+        peerId: peerbit.peerId.toString(),
+        publicKey: peerbit.identity.publicKey.toString(),
         siteAddress,
         listeningOn,
       });
@@ -219,14 +206,14 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         logger.info('Running in replication-only mode, starting periodic status logging');
         const statusInterval = setInterval(async () => {
           try {
-            const connections = client!.libp2p.getConnections();
+            const connections = peerbit!.libp2p.getConnections();
             const subscriptions = await lensService!.getSubscriptions();
-            
+
             // Get release counts for each store
             const releaseCount = await lensService!.siteProgram!.releases.index.getSize();
             const featuredCount = await lensService!.siteProgram!.featuredReleases.index.getSize();
             const subscriptionCount = await lensService!.siteProgram!.subscriptions.index.getSize();
-            
+
             logger.info('Replication status', {
               connections: connections.length,
               connectedPeers: connections.map(c => c.remotePeer.toString()),
@@ -243,7 +230,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             logError('Error logging replication status', error);
           }
         }, 60000); // Log every minute
-        
+
         // Clear interval on shutdown
         process.on('SIGINT', () => clearInterval(statusInterval));
         process.on('SIGTERM', () => clearInterval(statusInterval));
@@ -259,8 +246,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
                   choices: [
                     { name: 'Authorise an account', value: 'authorise' },
                     new inquirer.Separator(),
-                    { name: 'Manage Subscriptions', value: 'subscriptions' },
-                    new inquirer.Separator(),
+                    // { name: 'Manage Subscriptions', value: 'subscriptions' },
+                    // new inquirer.Separator(),
                     { name: 'Shutdown Node', value: 'shutdown' },
                   ],
                 },
@@ -279,36 +266,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
             switch (answers.action) {
               case 'authorise':
-                const { stringPubkicKey } = await inquirer.prompt([
-                  {
-                    type: 'input',
-                    name: 'stringPubkicKey',
-                    message: 'Enter the string public key of the account:',
-                  },
-                ]);
-                const accountType = await select({
-                  message: 'Select the account type',
-                  choices: [
-                    { name: 'Member', value: 1 },
-                    { name: 'Admin', value: 2 },
-                  ],
-                });
-
-                try {
-                  await lensService.siteProgram!.authorise(accountType, stringPubkicKey);
-                  logger.info('Account authorized successfully', {
-                    publicKey: stringPubkicKey,
-                    accountType: accountType === 1 ? 'Member' : 'Admin',
-                  });
-                } catch (error) {
-                  logError('Error authorizing account', error, {
-                    publicKey: stringPubkicKey,
-                    accountType,
-                  });
-                }
+                await handleAuthorizationMenu(lensService!);
                 break;
-              case 'subscriptions':
-                await handleSubscriptionMenu(lensService!);
+                // case 'subscriptions':
+                //   await handleSubscriptionMenu(lensService!);
                 break;
               case 'shutdown':
                 await shutdown('menu_shutdown_request');
@@ -327,187 +288,240 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         }
       }
 
-    } catch (error) {
+    } catch (e: unknown) {
+      const error = e instanceof Error ? e : new Error(String(e));
       logError('Fatal error in run command', error);
       await shutdown('fatal_error');
     }
   },
 };
 
-async function handleSubscriptionMenu(lensService: LensService) {
+async function handleAuthorizationMenu(lensService: LensService) {
   try {
-    const action = await select({
-      message: 'Subscription Management:',
+    const authType = await select({
+      message: 'What type of authorization do you want to grant?',
       choices: [
-        { name: 'View Current Subscriptions', value: 'view' },
-        { name: 'Subscribe to a Site', value: 'subscribe' },
-        { name: 'Unsubscribe from a Site', value: 'unsubscribe' },
-        { name: 'Back to Main Menu', value: 'back' },
-      ],
+        { name: 'Assign a Role', value: 'role', description: 'Grant specific permissions by assigning a role (e.g., member, moderator).' },
+        { name: 'Promote to Admin', value: 'admin', description: 'Grant full administrative privileges over the site.' },
+      ]
     });
 
-    switch (action) {
-      case 'view':
-        await viewSubscriptions(lensService);
-        break;
-      case 'subscribe':
-        await subscribeSite(lensService);
-        break;
-      case 'unsubscribe':
-        await unsubscribeSite(lensService);
-        break;
-      case 'back':
-        return;
-    }
-  } catch (error) {
-    console.error('Error in subscription menu:', (error as Error).message);
-  }
-}
-
-async function viewSubscriptions(lensService: LensService) {
-  try {
-    logger.info('Fetching current subscriptions');
-    const subscriptions = await lensService.getSubscriptions();
-    
-    logSubscriptionEvent('subscriptions:viewed', {
-      count: subscriptions.length,
+    const stringPublicKey = await input({
+      message: 'Enter the public key of the account to authorize:',
+      validate: (value) => value.length > 0 ? true : 'Public key cannot be empty.',
     });
-    
-    if (subscriptions.length === 0) {
-      logger.info('\nNo subscriptions found.\n');
-      return;
-    }
 
-    console.log('\nCurrent Subscriptions:');
-    console.log('─'.repeat(80));
-    
-    subscriptions.forEach((sub, index) => {
-      logger.info({
-        siteAddress: sub[SITE_ADDRESS_PROPERTY],
-        name: sub[SUBSCRIPTION_NAME_PROPERTY] ?? 'Unnamed'
-      })
-    });
-  } catch (error) {
-    console.error('Error fetching subscriptions:', (error as Error).message);
-  }
-}
-
-async function subscribeSite(lensService: LensService) {
-  try {
-    const { siteAddress } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'siteAddress',
-        message: 'Enter the Site Address to subscribe to:',
-        required: true,
-        validate: (input) => {
-          if (!input.trim()) {
-            return 'Site ID cannot be empty';
-          }
-          return true;
-        },
-      },
-    ]);
-
-    const { name } = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'name',
-        message: 'Enter a name for this subscription (optional):',
-        required: false,
-      },
-    ]);
-
-    const subscriptionData = {
-      [SITE_ADDRESS_PROPERTY]: siteAddress.trim(),
-      [SUBSCRIPTION_NAME_PROPERTY]: name.trim() || undefined,
-    };
-
-    logSubscriptionEvent('subscription:add:start', subscriptionData);
-    const result = await lensService.addSubscription(subscriptionData);
-
-    if (result.success) {
-      logSubscriptionEvent('subscription:add:success', {
-        ...subscriptionData,
-        id: result.id,
-        hash: result.hash,
+    if (authType === 'admin') {
+      const result = await lensService.addAdmin(stringPublicKey);
+      if (result.success) {
+        logger.info('✅ Account promoted to Admin successfully.', {
+          publicKey: stringPublicKey,
+        });
+      } else {
+        logError('❌ Failed to promote account to Admin.', new Error(result.error), {
+          publicKey: stringPublicKey,
+        });
+      }
+    } else if (authType === 'role') {
+      const allRoles = await lensService.getRoles();
+      if (allRoles.length === 0) {
+        logger.warn('No roles found on this site. Cannot assign a role.');
+        return; // Exit the function if no roles are defined
+      }
+      const selectedRole = await select({
+        message: 'Select the role to assign:',
+        choices: allRoles.map(role => ({
+          name: role.name.toUpperCase(),
+          value: role.name
+        }))
       });
-    } else {
-      logError('Failed to add subscription', new Error(result.error || 'Unknown error'), subscriptionData);
+
+      const result = await lensService.assignRole(stringPublicKey, selectedRole);
+      if (result.success) {
+        logger.info(`✅ Role "${selectedRole}" assigned successfully.`, {
+          publicKey: stringPublicKey,
+          role: selectedRole,
+        });
+      } else {
+        logError(`❌ Failed to assign role "${selectedRole}".`, new Error(result.error), {
+          publicKey: stringPublicKey,
+          role: selectedRole,
+        });
+      }
     }
   } catch (error) {
-    logError('Error subscribing to site:', (error as Error).message);
+    // This catches errors from the prompts (e.g., Ctrl+C) or the service calls
+    if (error instanceof Error && !error.message.includes('User force closed')) {
+      logError('Error during authorization process', error);
+    }
+    // If user cancels, we just return to the main menu silently.
   }
 }
 
-async function unsubscribeSite(lensService: LensService) {
-  try {
-    const subscriptions = await lensService.getSubscriptions();
-    
-    if (subscriptions.length === 0) {
-      console.log('\nNo subscriptions to remove.\n');
-      return;
-    }
+// async function handleSubscriptionMenu(lensService: LensService) {
+//   try {
+//     const action = await select({
+//       message: 'Subscription Management:',
+//       choices: [
+//         { name: 'View Current Subscriptions', value: 'view' },
+//         { name: 'Subscribe to a Site', value: 'subscribe' },
+//         { name: 'Unsubscribe from a Site', value: 'unsubscribe' },
+//         { name: 'Back to Main Menu', value: 'back' },
+//       ],
+//     });
 
-    const choices = subscriptions.map((sub, index) => ({
-      name: `${sub[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed'} - ${sub[SITE_ADDRESS_PROPERTY]}`,
-      value: sub.id,
-    }));
+//     switch (action) {
+//       case 'view':
+//         await viewSubscriptions(lensService);
+//         break;
+//       case 'subscribe':
+//         await subscribeSite(lensService);
+//         break;
+//       case 'unsubscribe':
+//         await unsubscribeSite(lensService);
+//         break;
+//       case 'back':
+//         return;
+//     }
+//   } catch (error) {
+//     console.error('Error in subscription menu:', (error as Error).message);
+//   }
+// }
 
-    const { subscriptionId } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'subscriptionId',
-        message: 'Select a subscription to remove:',
-        choices: [
-          ...choices,
-          new inquirer.Separator(),
-          { name: 'Cancel', value: 'cancel' },
-        ],
-      },
-    ]);
+// async function viewSubscriptions(lensService: LensService) {
+//   try {
+//     logger.info('Fetching current subscriptions');
+//     const subscriptions = await lensService.getSubscriptions();
 
-    if (subscriptionId === 'cancel') {
-      return;
-    }
+//     logSubscriptionEvent('subscriptions:viewed', {
+//       count: subscriptions.length,
+//     });
 
-    const { confirm } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: 'Are you sure you want to unsubscribe?',
-        default: false,
-      },
-    ]);
+//     if (subscriptions.length === 0) {
+//       logger.info('\nNo subscriptions found.\n');
+//       return;
+//     }
 
-    if (!confirm) {
-      console.log('\nUnsubscribe cancelled.\n');
-      return;
-    }
+//     console.log('\nCurrent Subscriptions:');
+//     console.log('─'.repeat(80));
 
-    const subToDelete = subscriptions.find(s => s.id === subscriptionId);
-    logSubscriptionEvent('subscription:delete:start', {
-      id: subscriptionId,
-      siteAddress: subToDelete?.[SITE_ADDRESS_PROPERTY],
-    });
-    
-    const result = await lensService.deleteSubscription({ id: subscriptionId });
+//     subscriptions.forEach((sub, index) => {
+//       logger.info({
+//         id: sub.id,
+//         siteAddress: sub.siteAddress,
+//       })
+//     });
+//   } catch (error) {
+//     console.error('Error fetching subscriptions:', (error as Error).message);
+//   }
+// }
 
-    if (result.success) {
-      logSubscriptionEvent('subscription:delete:success', {
-        id: subscriptionId,
-        siteAddress: subToDelete?.[SITE_ADDRESS_PROPERTY],
-      });
-      console.log('\n✅ Successfully unsubscribed!\n');
-    } else {
-      logError('Failed to delete subscription', new Error(result.error || 'Unknown error'), {
-        id: subscriptionId,
-      });
-      console.error(`\n❌ Failed to unsubscribe: ${result.error}\n`);
-    }
-  } catch (error) {
-    console.error('Error unsubscribing:', (error as Error).message);
-  }
-}
+// async function subscribeSite(lensService: LensService) {
+//   try {
+//     const { siteAddress } = await inquirer.prompt([
+//       {
+//         type: 'input',
+//         name: 'siteAddress',
+//         message: 'Enter the Site Address to subscribe to:',
+//         required: true,
+//         validate: (input) => {
+//           if (!input.trim()) {
+//             return 'Site ID cannot be empty';
+//           }
+//           return true;
+//         },
+//       },
+//     ]);
+
+//     const subscriptionData = {
+//       siteAddress: siteAddress.trim(),
+//     };
+
+//     logSubscriptionEvent('subscription:add:start', subscriptionData);
+//     const result = await lensService.addSubscription(subscriptionData);
+
+//     if (result.success) {
+//       logSubscriptionEvent('subscription:add:success', {
+//         ...subscriptionData,
+//         id: result.id,
+//         hash: result.hash,
+//       });
+//     } else {
+//       logError('Failed to add subscription', new Error(result.error || 'Unknown error'), subscriptionData);
+//     }
+//   } catch (error) {
+//     logError('Error subscribing to site:', (error as Error).message);
+//   }
+// }
+
+// async function unsubscribeSite(lensService: LensService) {
+//   try {
+//     const subscriptions = await lensService.getSubscriptions();
+
+//     if (subscriptions.length === 0) {
+//       console.log('\nNo subscriptions to remove.\n');
+//       return;
+//     }
+
+//     const choices = subscriptions.map((sub, index) => ({
+//       name: `${sub[SUBSCRIPTION_NAME_PROPERTY] || 'Unnamed'} - ${sub[SITE_ADDRESS_PROPERTY]}`,
+//       value: sub.id,
+//     }));
+
+//     const { subscriptionId } = await inquirer.prompt([
+//       {
+//         type: 'list',
+//         name: 'subscriptionId',
+//         message: 'Select a subscription to remove:',
+//         choices: [
+//           ...choices,
+//           new inquirer.Separator(),
+//           { name: 'Cancel', value: 'cancel' },
+//         ],
+//       },
+//     ]);
+
+//     if (subscriptionId === 'cancel') {
+//       return;
+//     }
+
+//     const { confirm } = await inquirer.prompt([
+//       {
+//         type: 'confirm',
+//         name: 'confirm',
+//         message: 'Are you sure you want to unsubscribe?',
+//         default: false,
+//       },
+//     ]);
+
+//     if (!confirm) {
+//       console.log('\nUnsubscribe cancelled.\n');
+//       return;
+//     }
+
+//     const subToDelete = subscriptions.find(s => s.id === subscriptionId);
+//     logSubscriptionEvent('subscription:delete:start', {
+//       id: subscriptionId,
+//       siteAddress: subToDelete?.[SITE_ADDRESS_PROPERTY],
+//     });
+
+//     const result = await lensService.deleteSubscription({ id: subscriptionId });
+
+//     if (result.success) {
+//       logSubscriptionEvent('subscription:delete:success', {
+//         id: subscriptionId,
+//         siteAddress: subToDelete?.[SITE_ADDRESS_PROPERTY],
+//       });
+//       console.log('\n✅ Successfully unsubscribed!\n');
+//     } else {
+//       logError('Failed to delete subscription', new Error(result.error || 'Unknown error'), {
+//         id: subscriptionId,
+//       });
+//       console.error(`\n❌ Failed to unsubscribe: ${result.error}\n`);
+//     }
+//   } catch (error) {
+//     console.error('Error unsubscribing:', (error as Error).message);
+//   }
+// }
 
 export default runCommand;
