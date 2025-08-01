@@ -11,7 +11,7 @@ import path from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const packageJsonPath = path.resolve(__dirname, '../package.json');
+const packageJsonPath = path.resolve(__dirname, '../../package.json');
 const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 
 yargs(hideBin(process.argv))

@@ -5,6 +5,7 @@ import confirm from "@inquirer/confirm";
 import Ajv, { JSONSchemaType } from 'ajv';
 import { CONFIG_FILE_NAME, DEFAULT_NODE_DIR } from './constants.js';
 import { SiteConfig } from './types.js';
+import { categoriesFileSchema, type ContentCategoryData, type ContentCategoryMetadataField } from '@riffcc/lens-sdk';
 
 
 export function getDefaultDir() {
@@ -78,6 +79,35 @@ export function readConfig(dir: string): SiteConfig {
       throw new Error(`Failed to read config: ${error.message}`);
     }
     throw new Error('Failed to read config: Unknown error');
+  }
+}
+
+export function readAndValidateCategoriesFile(filePath: string): ContentCategoryData<ContentCategoryMetadataField>[] {
+  const ajv = new Ajv({ allErrors: true });
+  const validate = ajv.compile(categoriesFileSchema);
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Categories file not found at ${filePath}.`);
+    }
+
+    const fileData = readFileSync(filePath, 'utf8');
+    const categories: ContentCategoryData<ContentCategoryMetadataField>[] = JSON.parse(fileData);
+
+    if (!validate(categories)) {
+      const errors = validate.errors?.map(err =>
+        `${err.instancePath || 'categories'} ${err.message}`
+      ).join('; ');
+      throw new Error(`Invalid categories file format: ${errors}`);
+    }
+
+    return categories;
+  } catch (error) {
+    if (error instanceof Error) {
+      // Re-throw with a more specific prefix
+      throw new Error(`Failed to process categories file: ${error.message}`);
+    }
+    throw new Error('Failed to process categories file: Unknown error');
   }
 }
 
