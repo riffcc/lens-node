@@ -13,6 +13,7 @@ import { startServer } from '../../api/server.js';
 import { MigrationGenerator } from '../../migrations/generator.js';
 import { MigrationRunner } from '../../migrations/runner.js';
 import { defaultSiteContentCategories } from '@riffcc/lens-sdk';
+import { handleUpdateTrackNamesFromID3 } from './updateTrackNames.js';
 
 
 type RunCommandArgs = {
@@ -249,8 +250,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             const menuChoices = [
               { name: 'Authorise an account', value: 'authorise' },
               new inquirer.Separator(),
-              { name: 'Apply migrations', value: 'apply-migrations' },
-              { name: 'Update Content Categories', value: 'update-categories' },
+              { name: 'Maintenance', value: 'maintenance' },
               new inquirer.Separator(),
               // { name: 'Manage Subscriptions', value: 'subscriptions' },
               // new inquirer.Separator(),
@@ -294,17 +294,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
               case 'authorise':
                 await handleAuthorizationMenu(lensService!);
                 break;
-              case 'apply-migrations':
-                await handleApplyMigrations(lensService!, argv.dir);
-                break;
-                // case 'subscriptions':
-                //   await handleSubscriptionMenu(lensService!);
+              case 'maintenance':
+                await handleMaintenanceMenu(lensService!, argv.dir);
                 break;
               case 'generate-migration':
                 await handleGenerateMigration(lensService!, argv.dir);
-                break;
-              case 'update-categories':
-                await handleUpdateCategories(lensService!);
                 break;
               case 'db-stats':
                 await handleDatabaseStats(lensService!);
@@ -564,6 +558,39 @@ async function handleAuthorizationMenu(lensService: LensService) {
 //     console.error('Error unsubscribing:', (error as Error).message);
 //   }
 // }
+
+async function handleMaintenanceMenu(lensService: LensService, dir: string) {
+  try {
+    const action = await select({
+      message: 'Maintenance Options:',
+      choices: [
+        { name: 'Apply migrations', value: 'apply-migrations' },
+        { name: 'Update Content Categories', value: 'update-categories' },
+        { name: 'Update track names from ID3 tags', value: 'update-id3' },
+        new inquirer.Separator(),
+        { name: 'Back to Main Menu', value: 'back' },
+      ],
+    });
+
+    switch (action) {
+      case 'apply-migrations':
+        await handleApplyMigrations(lensService, dir);
+        break;
+      case 'update-categories':
+        await handleUpdateCategories(lensService);
+        break;
+      case 'update-id3':
+        await handleUpdateTrackNamesFromID3(lensService);
+        break;
+      case 'back':
+        return;
+    }
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes('User force closed')) {
+      logError('Error in maintenance menu', error);
+    }
+  }
+}
 
 async function handleApplyMigrations(lensService: LensService, dir: string) {
   try {
