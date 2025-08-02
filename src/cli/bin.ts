@@ -5,6 +5,10 @@ import { hideBin } from 'yargs/helpers';
 import runCommand from './commands/run.js';
 import setupCommand from './commands/setup.js';
 import importCommand from './commands/import.js';
+import { generateMigrationCommand } from './commands/generate-migration.js';
+import { migrateCommand } from './commands/migrate.js';
+import { undoCommand } from './commands/undo.js';
+import { releasesMigrateCommand } from './commands/releases-migrate.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -19,6 +23,10 @@ yargs(hideBin(process.argv))
   .command(setupCommand)
   .command(runCommand)
   .command(importCommand)
+  .command(generateMigrationCommand)
+  .command(migrateCommand)
+  .command(undoCommand)
+  .command(releasesMigrateCommand)
   .demandCommand(1, 'A command must be specified.')
   .strict()
   .help()

@@ -1,0 +1,5 @@
+# Ignore all migration files by default
+*.migration.ts
+
+# But allow specific release migrations to be committed
+# Example: !2025-01-15T00-00-00-000Z_v0-1-32_to_v0-1-33.migration.ts

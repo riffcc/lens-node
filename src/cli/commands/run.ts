@@ -10,6 +10,9 @@ import fs from 'node:fs';
 import { dirOption } from './commonOptions.js';
 import { logger, logPeerEvent, logError, logSubscriptionEvent } from '../logger.js';
 import { startServer } from '../../api/server.js';
+import { MigrationGenerator } from '../../migrations/generator.js';
+import { MigrationRunner } from '../../migrations/runner.js';
+import { defaultSiteContentCategories } from '@riffcc/lens-sdk';
 
 
 type RunCommandArgs = {
@@ -17,6 +20,7 @@ type RunCommandArgs = {
   domain?: string[];
   listenPort: number;
   onlyReplicate?: boolean;
+  dev?: boolean;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -43,6 +47,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       .option('onlyReplicate', {
         type: 'boolean',
         description: 'Run the node in replicator mode',
+      })
+      .option('dev', {
+        type: 'boolean',
+        description: 'Enable development mode with additional menu options',
+        default: false,
       }),
   handler: async (argv) => {
     let peerbit: Peerbit | undefined;
@@ -237,19 +246,36 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       } else {
         while (!isShuttingDown) {
           try {
+            const menuChoices = [
+              { name: 'Authorise an account', value: 'authorise' },
+              new inquirer.Separator(),
+              { name: 'Apply migrations', value: 'apply-migrations' },
+              { name: 'Update Content Categories', value: 'update-categories' },
+              new inquirer.Separator(),
+              // { name: 'Manage Subscriptions', value: 'subscriptions' },
+              // new inquirer.Separator(),
+            ];
+
+            // Add development options if --dev flag is used
+            if (argv.dev) {
+              menuChoices.push(
+                new inquirer.Separator('--- Development Tools ---'),
+                { name: 'Generate Migration', value: 'generate-migration' },
+                { name: 'View Database Stats', value: 'db-stats' },
+                { name: 'Export Site Data', value: 'export-data' },
+                new inquirer.Separator(),
+              );
+            }
+
+            menuChoices.push({ name: 'Shutdown Node', value: 'shutdown' });
+
             const answers = await inquirer.prompt(
               [
                 {
                   type: 'list',
                   name: 'action',
                   message: 'Actions:',
-                  choices: [
-                    { name: 'Authorise an account', value: 'authorise' },
-                    new inquirer.Separator(),
-                    // { name: 'Manage Subscriptions', value: 'subscriptions' },
-                    // new inquirer.Separator(),
-                    { name: 'Shutdown Node', value: 'shutdown' },
-                  ],
+                  choices: menuChoices,
                 },
               ],
               {
@@ -268,8 +294,23 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
               case 'authorise':
                 await handleAuthorizationMenu(lensService!);
                 break;
+              case 'apply-migrations':
+                await handleApplyMigrations(lensService!, argv.dir);
+                break;
                 // case 'subscriptions':
                 //   await handleSubscriptionMenu(lensService!);
+                break;
+              case 'generate-migration':
+                await handleGenerateMigration(lensService!, argv.dir);
+                break;
+              case 'update-categories':
+                await handleUpdateCategories(lensService!);
+                break;
+              case 'db-stats':
+                await handleDatabaseStats(lensService!);
+                break;
+              case 'export-data':
+                await handleExportData(lensService!);
                 break;
               case 'shutdown':
                 await shutdown('menu_shutdown_request');
@@ -523,5 +564,205 @@ async function handleAuthorizationMenu(lensService: LensService) {
 //     console.error('Error unsubscribing:', (error as Error).message);
 //   }
 // }
+
+async function handleApplyMigrations(lensService: LensService, dir: string) {
+  try {
+    logger.info('Checking for pending migrations...');
+    
+    const runner = new MigrationRunner(dir);
+    await runner.loadMigrations();
+    const applied = await runner.getAppliedMigrations();
+    
+    // Get pending migrations by checking which ones haven't been applied
+    const allMigrations = (runner as any).migrations || [];
+    const pending = allMigrations.filter((m: any) => !applied.includes(m.id));
+    
+    if (pending.length === 0) {
+      logger.info('No pending migrations found');
+      return;
+    }
+    
+    logger.info(`Found ${pending.length} pending migration(s):`);
+    pending.forEach((m: any) => {
+      logger.info(`  - ${m.id}: ${m.description}`);
+    });
+    
+    const confirm = await input({
+      message: 'Apply these migrations? (yes/no)',
+      default: 'no',
+    });
+    
+    if (confirm.toLowerCase() === 'yes' || confirm.toLowerCase() === 'y') {
+      await runner.run(lensService);
+      logger.info('Migrations applied successfully');
+    } else {
+      logger.info('Migration cancelled');
+    }
+  } catch (error) {
+    logError('Error applying migrations', error);
+  }
+}
+
+async function handleGenerateMigration(lensService: LensService, dir: string) {
+  try {
+    const fromVersion = await input({
+      message: 'Enter source version (e.g., 0.1.32):',
+      default: '0.1.32',
+    });
+    
+    const toVersion = await input({
+      message: 'Enter target version (e.g., 0.1.33):',
+      default: '0.1.33',
+    });
+    
+    logger.info(`Generating migration from v${fromVersion} to v${toVersion}...`);
+    
+    const generator = new MigrationGenerator(lensService);
+    await generator.generateMigration(fromVersion, toVersion);
+    
+    logger.info('Migration generation complete');
+  } catch (error) {
+    logError('Error generating migration', error);
+  }
+}
+
+async function handleUpdateCategories(lensService: LensService) {
+  try {
+    logger.info('Checking for content category updates...');
+    
+    const generator = new MigrationGenerator(lensService);
+    // Use interactive mode to handle field removals/renames
+    const changes = await generator.detectChanges(true);
+    
+    if (changes.length === 0) {
+      logger.info('No category updates needed');
+      return;
+    }
+    
+    logger.info(`\nSummary of changes to apply:`);
+    logger.info('─'.repeat(50));
+    changes.forEach(change => {
+      if (change.type === 'rename-field') {
+        logger.info(`  - Rename field '${change.oldField}' to '${change.newField}' in category '${change.categoryId}'`);
+      } else {
+        logger.info(`  - ${change.type} ${change.categoryId}${change.field ? `.${change.field}` : ''}`);
+      }
+    });
+    logger.info('─'.repeat(50));
+    
+    const confirm = await input({
+      message: 'Apply these changes? (yes/no)',
+      default: 'no',
+    });
+    
+    if (confirm.toLowerCase() === 'yes' || confirm.toLowerCase() === 'y') {
+      logger.info('Applying changes...');
+      await generator.applyChanges(changes);
+      logger.info('Category updates complete!');
+      
+      // Check if any releases need metadata migration
+      const renamedFields = changes.filter(c => c.type === 'rename-field');
+      if (renamedFields.length > 0) {
+        logger.warn('\nIMPORTANT: The following field renames require release metadata migration:');
+        renamedFields.forEach(change => {
+          logger.warn(`  - Category '${change.categoryId}': field '${change.oldField}' → '${change.newField}'`);
+        });
+        logger.warn('Run "Generate Migration" to create a migration script for updating release metadata.');
+      }
+    } else {
+      logger.info('Update cancelled');
+    }
+  } catch (error) {
+    logError('Error updating categories', error);
+  }
+}
+
+async function handleDatabaseStats(lensService: LensService) {
+  try {
+    const site = lensService.siteProgram;
+    if (!site) {
+      logger.error('Site not initialized');
+      return;
+    }
+    
+    const stats = {
+      releases: await site.releases.index.getSize(),
+      featuredReleases: await site.featuredReleases.index.getSize(),
+      subscriptions: await site.subscriptions.index.getSize(),
+      contentCategories: await site.contentCategories.index.getSize(),
+      // blockList: await site.blockList.index.getSize(), // TODO: Add when available
+    };
+    
+    logger.info('Database Statistics:');
+    logger.info('─'.repeat(50));
+    Object.entries(stats).forEach(([key, value]) => {
+      logger.info(`${key}: ${value}`);
+    });
+    logger.info('─'.repeat(50));
+    
+    // Show category details
+    const categories = await lensService.getContentCategories();
+    logger.info('\nContent Categories:');
+    categories.forEach(cat => {
+      let schemaFieldCount = 0;
+      try {
+        const schema = JSON.parse(cat.metadataSchema || '{}');
+        schemaFieldCount = Object.keys(schema).length;
+      } catch (e) {}
+      logger.info(`  - ${cat.categoryId} (${cat.displayName}): ${schemaFieldCount} metadata fields`);
+    });
+    
+  } catch (error) {
+    logError('Error getting database stats', error);
+  }
+}
+
+async function handleExportData(lensService: LensService) {
+  try {
+    const exportType = await select({
+      message: 'What would you like to export?',
+      choices: [
+        { name: 'All Releases', value: 'releases' },
+        { name: 'Content Categories', value: 'categories' },
+        { name: 'Featured Releases', value: 'featured' },
+        { name: 'Subscriptions', value: 'subscriptions' },
+        { name: 'Everything', value: 'all' },
+      ],
+    });
+    
+    const filename = await input({
+      message: 'Enter filename for export:',
+      default: `lens-export-${exportType}-${Date.now()}.json`,
+    });
+    
+    let exportData: any = {};
+    
+    if (exportType === 'releases' || exportType === 'all') {
+      const releases = await lensService.getReleases();
+      exportData.releases = releases;
+    }
+    
+    if (exportType === 'categories' || exportType === 'all') {
+      const categories = await lensService.getContentCategories();
+      exportData.categories = categories;
+    }
+    
+    if (exportType === 'featured' || exportType === 'all') {
+      const featured = await lensService.getFeaturedReleases();
+      exportData.featured = featured;
+    }
+    
+    if (exportType === 'subscriptions' || exportType === 'all') {
+      const subscriptions = await lensService.getSubscriptions();
+      exportData.subscriptions = subscriptions;
+    }
+    
+    fs.writeFileSync(filename, JSON.stringify(exportData, null, 2));
+    logger.info(`Data exported to ${filename}`);
+    
+  } catch (error) {
+    logError('Error exporting data', error);
+  }
+}
 
 export default runCommand;
