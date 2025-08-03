@@ -6,7 +6,8 @@ import {
   createReleaseRouter,
   createFeaturedReleasesRouter,
   createCategoriesRouter,
-  createSubscriptionsRouter
+  createSubscriptionsRouter,
+  createArtistsRouter
 } from './routes/index.js';
 
 // =========================================================================
@@ -43,6 +44,7 @@ export function startServer({ lensService }: { lensService: LensService }): Appl
   apiRouter.use('/featured-releases', createFeaturedReleasesRouter({ lensService }));
   apiRouter.use('/content-categories', createCategoriesRouter({ lensService }));
   apiRouter.use('/subscriptions', createSubscriptionsRouter({ lensService }));
+  apiRouter.use('/artists', createArtistsRouter({ lensService }));
 
   app.use('/api/v1', apiRouter);
 
