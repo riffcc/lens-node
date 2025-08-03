@@ -13,25 +13,20 @@ export const fixRbacTypoMigration: ProgramMigration = {
   description: 'Fix RoleBasedccessController typo in access control system',
   
   async check(service) {
-    try {
-      // If we can access the site program, the migration is not needed
-      // (either already applied or using new deployment)
-      const site = (service as any).siteProgram;
-      if (site && site.access) {
-        logger.debug('Site access controller is accessible, migration not needed');
-        return false;
-      }
-      return false;
-    } catch (error) {
-      // If we get a deserialization error mentioning the typo, migration is needed
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes('RoleBasedccessController') || 
-          errorMessage.includes('RoleBasedAccessController')) {
-        logger.warn('Detected RBAC typo issue, migration needed');
-        return true;
-      }
-      return false;
+    // Check if the service has a loaded site program
+    const site = (service as any).siteProgram;
+    
+    // If there's no site program, it likely failed to load due to the RBAC issue
+    if (!site) {
+      logger.warn('No site program loaded - likely due to RBAC deserialization issue');
+      // Double-check by looking at the data directory for the specific store
+      // For now, assume it needs migration if site didn't load
+      return true;
     }
+    
+    // If site loaded successfully, no migration needed
+    logger.debug('Site program loaded successfully, no migration needed');
+    return false;
   },
   
   async run(service, dataDir) {
