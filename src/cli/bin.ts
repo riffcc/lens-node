@@ -10,6 +10,8 @@ import { migrateCommand } from './commands/migrate.js';
 import { undoCommand } from './commands/undo.js';
 import { releasesMigrateCommand } from './commands/releases-migrate.js';
 import { programMigrateCommand } from './commands/program-migrate.js';
+import { exportDataCommand } from './commands/export-data.js';
+import { importDataCommand } from './commands/import-data.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';

@@ -5,12 +5,27 @@ export const createReleaseRouter = ({ lensService }: { lensService: LensService 
   const router = Router();
 
   // Route for getting all releases
-  router.get('/', async (_req, res, next) => {
+  router.get('/', async (req, res, next) => {
     try {
-      const releases = await lensService.getReleases();
+      const { category } = req.query;
+      let releases = await lensService.getReleases();
       
       // Fetch all categories to resolve display names
       const categories = await lensService.getContentCategories();
+      
+      // If category filter is provided (as slug), filter releases from all matching categories
+      if (category && typeof category === 'string') {
+        // Find all category IDs that match the slug
+        const matchingCategoryIds = categories
+          .filter(cat => cat.categoryId === category)
+          .map(cat => cat.id);
+        
+        // Filter releases by all matching category IDs
+        releases = releases.filter(release => 
+          matchingCategoryIds.includes(release.categoryId)
+        );
+      }
+      
       const categoryMap = new Map(categories.map(cat => [cat.categoryId, cat]));
       
       // Enhance releases with category information
