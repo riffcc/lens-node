@@ -9,6 +9,9 @@ import { generateMigrationCommand } from './commands/generate-migration.js';
 import { migrateCommand } from './commands/migrate.js';
 import { undoCommand } from './commands/undo.js';
 import { releasesMigrateCommand } from './commands/releases-migrate.js';
+import { programMigrateCommand } from './commands/program-migrate.js';
+import { exportDataCommand } from './commands/export-data.js';
+import { importDataCommand } from './commands/import-data.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
@@ -27,6 +30,7 @@ yargs(hideBin(process.argv))
   .command(migrateCommand)
   .command(undoCommand)
   .command(releasesMigrateCommand)
+  .command(programMigrateCommand)
   .demandCommand(1, 'A command must be specified.')
   .strict()
   .help()

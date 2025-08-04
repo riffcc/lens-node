@@ -1,5 +1,5 @@
 import inquirer from 'inquirer';
-import { input, select } from '@inquirer/prompts';
+import { input, select, confirm } from '@inquirer/prompts';
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions } from '../types.js';
@@ -13,12 +13,14 @@ import { startServer } from '../../api/server.js';
 import { MigrationGenerator } from '../../migrations/generator.js';
 import { MigrationRunner } from '../../migrations/runner.js';
 import { defaultSiteContentCategories } from '@riffcc/lens-sdk';
+import { handleUpdateTrackNamesFromID3 } from './updateTrackNames.js';
 
 
 type RunCommandArgs = {
   relay?: boolean;
   domain?: string[];
   listenPort: number;
+  bindHost?: string;
   onlyReplicate?: boolean;
   dev?: boolean;
 };
@@ -43,6 +45,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'number',
         description: 'Port to listen on for libp2p configuration',
         default: DEFAULT_LISTEN_PORT_LIBP2P,
+      })
+      .option('bindHost', {
+        type: 'string',
+        description: 'IP address to bind to (e.g., 0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)',
+        default: '127.0.0.1',
       })
       .option('onlyReplicate', {
         type: 'boolean',
@@ -113,6 +120,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         directory: dir,
         onlyReplicate,
         siteAddress,
+        bindHost: argv.bindHost || (argv.onlyReplicate ? '0.0.0.0' : '127.0.0.1'),
+        listenPort: Number(argv['listen-port'] || argv.listenPort || DEFAULT_LISTEN_PORT_LIBP2P),
         bootstrappers: bootstrappers?.split(',').map(b => b.trim()),
         nodeVersion: process.version,
         platform: process.platform,
@@ -121,8 +130,12 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       // Set up libp2p configuration if domains are provided
       let libp2pConfig: Libp2pCreateOptions | undefined;
-      const { domain, listenPort } = argv
-      const bindHost = onlyReplicate ? '0.0.0.0' : '127.0.0.1';
+      const { domain } = argv;
+      const listenPort = Number(argv['listen-port'] || argv.listenPort || DEFAULT_LISTEN_PORT_LIBP2P);
+      // Use bindHost from argv, or default to 0.0.0.0 for onlyReplicate mode, otherwise 127.0.0.1
+      const bindHost = argv.bindHost || (argv.onlyReplicate ? '0.0.0.0' : '127.0.0.1');
+      
+      // Always set libp2p config with listen addresses
       libp2pConfig = {
         addresses: {
           announce: domain ?
@@ -192,7 +205,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       await lensService.openSite(siteConfig.address);
       logger.info('LensService configured.');
-      startServer({ lensService });
+      startServer({ lensService, bindHost });
       logger.info('Lens API REST up.');
       let listeningOn: string[] = [];
       try {
@@ -249,8 +262,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             const menuChoices = [
               { name: 'Authorise an account', value: 'authorise' },
               new inquirer.Separator(),
-              { name: 'Apply migrations', value: 'apply-migrations' },
-              { name: 'Update Content Categories', value: 'update-categories' },
+              { name: 'Maintenance', value: 'maintenance' },
               new inquirer.Separator(),
               // { name: 'Manage Subscriptions', value: 'subscriptions' },
               // new inquirer.Separator(),
@@ -294,17 +306,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
               case 'authorise':
                 await handleAuthorizationMenu(lensService!);
                 break;
-              case 'apply-migrations':
-                await handleApplyMigrations(lensService!, argv.dir);
-                break;
-                // case 'subscriptions':
-                //   await handleSubscriptionMenu(lensService!);
+              case 'maintenance':
+                await handleMaintenanceMenu(lensService!, argv.dir);
                 break;
               case 'generate-migration':
                 await handleGenerateMigration(lensService!, argv.dir);
-                break;
-              case 'update-categories':
-                await handleUpdateCategories(lensService!);
                 break;
               case 'db-stats':
                 await handleDatabaseStats(lensService!);
@@ -565,6 +571,48 @@ async function handleAuthorizationMenu(lensService: LensService) {
 //   }
 // }
 
+async function handleMaintenanceMenu(lensService: LensService, dir: string) {
+  try {
+    const action = await select({
+      message: 'Maintenance Options:',
+      choices: [
+        { name: 'Apply migrations', value: 'apply-migrations' },
+        { name: 'Update Content Categories', value: 'update-categories' },
+        { name: 'Update track names from ID3 tags', value: 'update-id3' },
+        new inquirer.Separator(),
+        { name: 'Export Site Data', value: 'export-data' },
+        { name: 'Import Site Data', value: 'import-data' },
+        new inquirer.Separator(),
+        { name: 'Back to Main Menu', value: 'back' },
+      ],
+    });
+
+    switch (action) {
+      case 'apply-migrations':
+        await handleApplyMigrations(lensService, dir);
+        break;
+      case 'update-categories':
+        await handleUpdateCategories(lensService);
+        break;
+      case 'update-id3':
+        await handleUpdateTrackNamesFromID3(lensService);
+        break;
+      case 'export-data':
+        await handleExportData(lensService);
+        break;
+      case 'import-data':
+        await handleImportData(lensService);
+        break;
+      case 'back':
+        return;
+    }
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes('User force closed')) {
+      logError('Error in maintenance menu', error);
+    }
+  }
+}
+
 async function handleApplyMigrations(lensService: LensService, dir: string) {
   try {
     logger.info('Checking for pending migrations...');
@@ -719,49 +767,207 @@ async function handleDatabaseStats(lensService: LensService) {
 
 async function handleExportData(lensService: LensService) {
   try {
-    const exportType = await select({
-      message: 'What would you like to export?',
-      choices: [
-        { name: 'All Releases', value: 'releases' },
-        { name: 'Content Categories', value: 'categories' },
-        { name: 'Featured Releases', value: 'featured' },
-        { name: 'Subscriptions', value: 'subscriptions' },
-        { name: 'Everything', value: 'all' },
-      ],
-    });
-    
     const filename = await input({
       message: 'Enter filename for export:',
-      default: `lens-export-${exportType}-${Date.now()}.json`,
+      default: `lens-export-${new Date().toISOString().split('T')[0]}.json`,
     });
     
-    let exportData: any = {};
+    logger.info('Starting data export...');
     
-    if (exportType === 'releases' || exportType === 'all') {
-      const releases = await lensService.getReleases();
-      exportData.releases = releases;
-    }
+    // Export all data with categorySlug mapping
+    const categories = await lensService.getContentCategories();
+    const categoryIdToSlugMap = new Map(categories.map(cat => [cat.id, cat.categoryId]));
     
-    if (exportType === 'categories' || exportType === 'all') {
-      const categories = await lensService.getContentCategories();
-      exportData.categories = categories;
-    }
+    const releases = await lensService.getReleases();
+    // Add categorySlug to each release for better import mapping
+    const releasesWithSlug = releases.map(release => ({
+      ...release,
+      categorySlug: categoryIdToSlugMap.get(release.categoryId)
+    }));
     
-    if (exportType === 'featured' || exportType === 'all') {
-      const featured = await lensService.getFeaturedReleases();
-      exportData.featured = featured;
-    }
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      siteAddress: lensService.siteProgram?.address,
+      releases: releasesWithSlug,
+      categories: categories,
+      featuredReleases: await lensService.getFeaturedReleases(),
+      subscriptions: await lensService.getSubscriptions(),
+      artists: await lensService.getArtists(),
+    };
     
-    if (exportType === 'subscriptions' || exportType === 'all') {
-      const subscriptions = await lensService.getSubscriptions();
-      exportData.subscriptions = subscriptions;
-    }
+    // Count items
+    logger.info(`Exporting:`);
+    logger.info(`  - ${exportData.releases.length} releases`);
+    logger.info(`  - ${exportData.categories.length} categories`);
+    logger.info(`  - ${exportData.featuredReleases.length} featured releases`);
+    logger.info(`  - ${exportData.subscriptions.length} subscriptions`);
+    logger.info(`  - ${exportData.artists.length} artists`);
     
     fs.writeFileSync(filename, JSON.stringify(exportData, null, 2));
-    logger.info(`Data exported to ${filename}`);
+    logger.info(`Data exported successfully to: ${filename}`);
     
   } catch (error) {
-    logError('Error exporting data', error);
+    logError('Export failed:', error);
+  }
+}
+
+async function handleImportData(lensService: LensService) {
+  try {
+    const filename = await input({
+      message: 'Enter path to import file:',
+      validate: (value) => {
+        if (!fs.existsSync(value)) {
+          return 'File does not exist';
+        }
+        return true;
+      }
+    });
+    
+    logger.info('Starting data import...');
+    
+    // Read the export file
+    const exportData = JSON.parse(fs.readFileSync(filename, 'utf-8'));
+    
+    logger.info(`Import file contains:`);
+    logger.info(`  - ${exportData.releases?.length || 0} releases`);
+    logger.info(`  - ${exportData.categories?.length || 0} categories`);
+    logger.info(`  - ${exportData.featuredReleases?.length || 0} featured releases`);
+    logger.info(`  - ${exportData.subscriptions?.length || 0} subscriptions`);
+    logger.info(`  - ${exportData.artists?.length || 0} artists`);
+    
+    const confirmImport = await confirm({
+      message: 'Do you want to proceed with the import?',
+      default: false
+    });
+    
+    if (!confirmImport) {
+      logger.info('Import cancelled');
+      return;
+    }
+    
+    // Create a mapping of categorySlug to new category ID
+    const categorySlugToIdMap = new Map<string, string>();
+    if (exportData.categories && exportData.categories.length > 0) {
+      const importedCategories = await lensService.getContentCategories();
+      for (const category of importedCategories) {
+        categorySlugToIdMap.set(category.categoryId, category.id);
+      }
+    }
+    
+    // Import categories first (releases depend on them)
+    if (exportData.categories && exportData.categories.length > 0) {
+      logger.info('Importing categories...');
+      for (const category of exportData.categories) {
+        try {
+          await lensService.addContentCategory({
+            categoryId: category.categoryId,
+            displayName: category.displayName,
+            featured: category.featured,
+            description: category.description,
+            metadataSchema: category.metadataSchema,
+          });
+          logger.debug(`Imported category: ${category.displayName}`);
+        } catch (err) {
+          logger.warn(`Failed to import category ${category.displayName}:`, err);
+        }
+      }
+    }
+    
+    // Import artists
+    if (exportData.artists && exportData.artists.length > 0) {
+      logger.info('Importing artists...');
+      for (const artist of exportData.artists) {
+        try {
+          await lensService.addArtist({
+            name: artist.name,
+            bio: artist.bio,
+            avatarCID: artist.avatarCID,
+            bannerCID: artist.bannerCID,
+            links: artist.links,
+            metadata: artist.metadata,
+          });
+          logger.debug(`Imported artist: ${artist.name}`);
+        } catch (err) {
+          logger.warn(`Failed to import artist ${artist.name}:`, err);
+        }
+      }
+    }
+    
+    // Import releases
+    if (exportData.releases && exportData.releases.length > 0) {
+      logger.info('Importing releases...');
+      for (const release of exportData.releases) {
+        try {
+          // If the release has a categorySlug, use it to find the new category ID
+          let categoryId = release.categoryId;
+          if (release.categorySlug && categorySlugToIdMap.has(release.categorySlug)) {
+            categoryId = categorySlugToIdMap.get(release.categorySlug)!;
+            logger.debug(`Mapped category slug '${release.categorySlug}' to ID '${categoryId}'`);
+          } else if (categorySlugToIdMap.size > 0) {
+            // Try to find category by matching the old categoryId as a slug
+            const matchingCategory = Array.from(categorySlugToIdMap.entries())
+              .find(([slug, _]) => slug === release.categoryId);
+            if (matchingCategory) {
+              categoryId = matchingCategory[1];
+              logger.debug(`Found category by slug match: '${release.categoryId}' -> '${categoryId}'`);
+            } else {
+              logger.warn(`Could not find category for release '${release.name}' with categoryId '${release.categoryId}'`);
+            }
+          }
+          
+          await lensService.addRelease({
+            name: release.name,
+            categoryId: categoryId,
+            contentCID: release.contentCID,
+            thumbnailCID: release.thumbnailCID,
+            artistIds: release.artistIds,
+            metadata: release.metadata,
+          });
+          logger.debug(`Imported release: ${release.name}`);
+        } catch (err) {
+          logger.warn(`Failed to import release ${release.name}:`, err);
+        }
+      }
+    }
+    
+    // Import featured releases
+    if (exportData.featuredReleases && exportData.featuredReleases.length > 0) {
+      logger.info('Importing featured releases...');
+      for (const featured of exportData.featuredReleases) {
+        try {
+          await lensService.addFeaturedRelease({
+            releaseId: featured.releaseId,
+            startTime: featured.startTime,
+            endTime: featured.endTime,
+            promoted: featured.promoted,
+            order: featured.order,
+          });
+          logger.debug(`Imported featured release: ${featured.releaseId}`);
+        } catch (err) {
+          logger.warn(`Failed to import featured release:`, err);
+        }
+      }
+    }
+    
+    // Import subscriptions
+    if (exportData.subscriptions && exportData.subscriptions.length > 0) {
+      logger.info('Importing subscriptions...');
+      for (const subscription of exportData.subscriptions) {
+        try {
+          await lensService.addSubscription({
+            to: subscription.to,
+          });
+          logger.debug(`Imported subscription to: ${subscription.to}`);
+        } catch (err) {
+          logger.warn(`Failed to import subscription:`, err);
+        }
+      }
+    }
+    
+    logger.info('Import completed successfully!');
+    
+  } catch (error) {
+    logError('Import failed:', error);
   }
 }
 

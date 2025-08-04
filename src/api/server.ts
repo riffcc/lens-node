@@ -6,7 +6,9 @@ import {
   createReleaseRouter,
   createFeaturedReleasesRouter,
   createCategoriesRouter,
-  createSubscriptionsRouter
+  createSubscriptionsRouter,
+  createArtistsRouter,
+  createStructuresRouter
 } from './routes/index.js';
 
 // =========================================================================
@@ -20,9 +22,9 @@ import {
 // =========================================================================
 
 
-export function startServer({ lensService }: { lensService: LensService }): Application {
+export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensService: LensService; bindHost?: string }): Application {
   const app = express();
-  const port = process.env.PORT || 5002;
+  const port = Number(process.env.PORT) || 5002;
 
   // --- Middleware ---
   app.use(cors());
@@ -43,6 +45,8 @@ export function startServer({ lensService }: { lensService: LensService }): Appl
   apiRouter.use('/featured-releases', createFeaturedReleasesRouter({ lensService }));
   apiRouter.use('/content-categories', createCategoriesRouter({ lensService }));
   apiRouter.use('/subscriptions', createSubscriptionsRouter({ lensService }));
+  apiRouter.use('/artists', createArtistsRouter({ lensService }));
+  apiRouter.use('/structures', createStructuresRouter({ lensService }));
 
   app.use('/api/v1', apiRouter);
 
@@ -60,8 +64,8 @@ export function startServer({ lensService }: { lensService: LensService }): Appl
     });
   };
   app.use(globalErrorHandler);
-  app.listen(port, () => {
-    console.log(`✅ Lens API REST up, listening on port ${port}`);
+  app.listen(port, bindHost, () => {
+    console.log(`✅ Lens API REST up, listening on ${bindHost}:${port}`);
   });
 
   return app;
