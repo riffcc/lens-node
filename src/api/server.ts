@@ -44,14 +44,20 @@ export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensServi
 
   apiRouter.get('/ready', async (_req, res) => {
     try {
-      const syncDetails = await lensService.getSyncDetails();
+      // Add timeout to prevent hanging
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Sync check timeout')), 5000);
+      });
+      
+      const syncDetailsPromise = lensService.getSyncDetails();
+      const syncDetails = await Promise.race([syncDetailsPromise, timeoutPromise]) as any;
       const peerCount = lensService.getPeerCount();
       
       // Log details for debugging
       console.log('Sync status check:', {
         synced: syncDetails.synced,
         peerCount,
-        stores: syncDetails.stores.map(s => ({
+        stores: syncDetails.stores.map((s: any) => ({
           name: s.name,
           replicating: s.replicating,
           count: s.count
@@ -68,7 +74,7 @@ export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensServi
       console.error('Error checking sync status:', error);
       res.status(500).json({
         ready: false,
-        error: 'Failed to check sync status',
+        error: error instanceof Error ? error.message : 'Failed to check sync status',
         timestamp: new Date().toISOString()
       });
     }
