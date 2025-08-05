@@ -264,7 +264,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logger.info('Initializing LensService...');
       lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
-      await lensService.openSite(siteConfig.address);
+      // Configure full replication for lens-node (dedicated server)
+      const siteArgs = {
+        releasesArgs: { replicate: true },
+        featuredReleasesArgs: { replicate: true },
+        contentCategoriesArgs: { replicate: true },
+        subscriptionsArgs: { replicate: true },
+        blockedContentArgs: { replicate: true },
+        structuresArgs: { replicate: true },
+      };
+
+      await lensService.openSite(siteConfig.address, { siteArgs });
       logger.info('LensService configured.');
       startServer({ lensService, bindHost });
       logger.info('Lens API REST up.');
