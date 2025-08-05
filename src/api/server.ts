@@ -41,6 +41,27 @@ export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensServi
     });
   });
 
+  apiRouter.get('/ready', async (_req, res) => {
+    try {
+      const syncDetails = await lensService.getSyncDetails();
+      const peerCount = lensService.getPeerCount();
+      
+      res.status(syncDetails.synced ? 200 : 503).json({
+        ready: syncDetails.synced,
+        peerCount,
+        stores: syncDetails.stores,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Error checking sync status:', error);
+      res.status(500).json({
+        ready: false,
+        error: 'Failed to check sync status',
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
   apiRouter.use('/releases', createReleaseRouter({ lensService }));
   apiRouter.use('/featured-releases', createFeaturedReleasesRouter({ lensService }));
   apiRouter.use('/content-categories', createCategoriesRouter({ lensService }));

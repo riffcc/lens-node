@@ -23,6 +23,7 @@ type RunCommandArgs = {
   bindHost?: string;
   onlyReplicate?: boolean;
   dev?: boolean;
+  useRelays?: boolean;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -59,11 +60,17 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'boolean',
         description: 'Enable development mode with additional menu options',
         default: false,
+      })
+      .option('useRelays', {
+        type: 'boolean',
+        description: 'Enable auto-relay to use circuit relay nodes (for NAT/firewall traversal)',
+        default: false,
       }),
   handler: async (argv) => {
     let peerbit: Peerbit | undefined;
     let lensService: LensService | undefined;
     let isShuttingDown = false;
+
 
     const shutdown = async (signal: string) => {
       if (isShuttingDown) return;
@@ -126,6 +133,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         nodeVersion: process.version,
         platform: process.platform,
         pid: process.pid,
+        relay: argv.relay,
+        useRelays: argv.useRelays,
       });
 
       // Set up libp2p configuration if domains are provided
@@ -150,6 +159,21 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           ],
         },
       };
+
+      // Enable auto-relay for NAT/firewall traversal if requested
+      if (argv.useRelays) {
+        // Add relay configuration to libp2p services
+        (libp2pConfig as any).config = {
+          relay: {
+            enabled: true,
+            autoRelay: {
+              enabled: true,
+              maxListeners: 2
+            }
+          }
+        };
+        logger.info('Auto-relay enabled for NAT/firewall traversal');
+      }
 
       // Initialize Peerbit client
       logger.info('Initializing Peerbit client', {
@@ -196,6 +220,43 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             bootstrapper: bootstrappersList[i],
             error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
           })),
+        });
+
+        // After startup, track bootstrapper connections and retry disconnected ones
+        const bootstrapperRetryAttempts = new Map<string, number>();
+        
+        // Monitor peer disconnections and retry bootstrappers
+        peerbit.libp2p.addEventListener('peer:disconnect', (evt) => {
+          const peerId = evt.detail.toString();
+          
+          // Check if this was a bootstrapper
+          const bootstrapperAddr = bootstrappersList.find(addr => addr.includes(peerId));
+          if (bootstrapperAddr) {
+            const attempts = bootstrapperRetryAttempts.get(bootstrapperAddr) || 0;
+            const backoffMs = Math.pow(4, attempts) * 1000; // 4x exponential backoff starting at 1s
+            
+            logger.info('Bootstrapper disconnected, scheduling reconnect', {
+              bootstrapper: bootstrapperAddr,
+              peerId,
+              attempts: attempts + 1,
+              retryIn: `${backoffMs/1000}s`
+            });
+            
+            setTimeout(async () => {
+              try {
+                await peerbit!.dial(bootstrapperAddr);
+                bootstrapperRetryAttempts.set(bootstrapperAddr, 0); // Reset on success
+                logger.info('Successfully reconnected to bootstrapper', { bootstrapper: bootstrapperAddr });
+              } catch (error) {
+                bootstrapperRetryAttempts.set(bootstrapperAddr, attempts + 1);
+                logger.warn('Failed to reconnect to bootstrapper', {
+                  bootstrapper: bootstrapperAddr,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                  attempts: attempts + 1
+                });
+              }
+            }, backoffMs);
+          }
         });
       }
 
