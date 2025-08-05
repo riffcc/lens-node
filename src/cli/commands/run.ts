@@ -24,6 +24,7 @@ type RunCommandArgs = {
   onlyReplicate?: boolean;
   dev?: boolean;
   useRelays?: boolean;
+  light?: boolean;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -65,6 +66,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'boolean',
         description: 'Enable auto-relay to use circuit relay nodes (for NAT/firewall traversal)',
         default: false,
+      })
+      .option('light', {
+        type: 'boolean',
+        description: 'Light mode for edge deployment - no P2P listening, API only',
+        default: false,
       }),
   handler: async (argv) => {
     let peerbit: Peerbit | undefined;
@@ -87,10 +93,18 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           logger.info('Peerbit client closed succesfully')
         }
         logger.info('Cleanup finished');
-      } catch (e: unknown) { // --- FIX #1: Use the improved logger here ---
+      } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
         logError('Error during shutdown', error);
       } finally {
+        // Close Winston transports to prevent "write after end" errors
+        try {
+          logger.close();
+          // Give a small delay for transports to finish closing
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (closeError) {
+          console.error('Error closing logger:', closeError);
+        }
         process.exit(0);
       }
     };
@@ -98,12 +112,23 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     // Handle termination signals
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    
+    // Prevent DeliveryError from crashing the process
+    process.on('uncaughtException', (error) => {
+      if (error.name === 'DeliveryError' || error.message?.includes('DeliveryError')) {
+        // DeliveryError is expected in P2P networks, just log it
+        console.log('DeliveryError (expected in P2P):', error.message);
+        return; // Don't crash
+      } else {
+        // Log other uncaught exceptions but don't exit
+        console.error('Uncaught Exception:', error.message, error.stack);
+        // Don't call process.exit() - let it continue running
+      }
+    });
 
     process.on('unhandledRejection', (reason, promise) => {
       console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    });
-    process.on('uncaughtException', (error) => {
-      console.error('Uncaught Exception:', error);
+      logger.error('Unhandled rejection', { reason: String(reason), promise: String(promise) });
     });
 
     try {
@@ -144,21 +169,32 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       // Use bindHost from argv, or default to 0.0.0.0 for onlyReplicate mode, otherwise 127.0.0.1
       const bindHost = argv.bindHost || (argv.onlyReplicate ? '0.0.0.0' : '127.0.0.1');
       
-      // Always set libp2p config with listen addresses
-      libp2pConfig = {
-        addresses: {
-          announce: domain ?
-            domain.flatMap(d => [
-              `/dns4/${d}/tcp/4002`,
-              `/dns4/${d}/tcp/4003/wss`,
-            ]) :
-            undefined,
-          listen: [
-            `/ip4/${bindHost}/tcp/${listenPort}`,
-            `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
-          ],
-        },
-      };
+      // Configure libp2p based on mode
+      if (argv.light) {
+        // Light mode: client-only node, no listening (outbound connections only)
+        libp2pConfig = {
+          addresses: {
+            listen: [], // Empty array = don't listen on any addresses
+          },
+        };
+        logger.info('Light mode enabled - client-only node with outbound connections only');
+      } else {
+        // Normal mode: set up listen addresses
+        libp2pConfig = {
+          addresses: {
+            announce: domain ?
+              domain.flatMap(d => [
+                `/dns4/${d}/tcp/4002`,
+                `/dns4/${d}/tcp/4003/wss`,
+              ]) :
+              undefined,
+            listen: [
+              `/ip4/${bindHost}/tcp/${listenPort}`,
+              `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
+            ],
+          },
+        };
+      }
 
       // Enable auto-relay for NAT/firewall traversal if requested
       if (argv.useRelays) {
@@ -264,14 +300,15 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logger.info('Initializing LensService...');
       lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
-      // Configure full replication for lens-node (dedicated server)
+      // Configure replication based on mode
+      const replicationConfig = argv.light ? { factor: 1 } : true;
       const siteArgs = {
-        releasesArgs: { replicate: true },
-        featuredReleasesArgs: { replicate: true },
-        contentCategoriesArgs: { replicate: true },
-        subscriptionsArgs: { replicate: true },
-        blockedContentArgs: { replicate: true },
-        structuresArgs: { replicate: true },
+        releasesArgs: { replicate: replicationConfig },
+        featuredReleasesArgs: { replicate: replicationConfig },
+        contentCategoriesArgs: { replicate: replicationConfig },
+        subscriptionsArgs: { replicate: replicationConfig },
+        blockedContentArgs: { replicate: replicationConfig },
+        structuresArgs: { replicate: replicationConfig },
       };
 
       await lensService.openSite(siteConfig.address, { siteArgs });

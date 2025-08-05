@@ -41,10 +41,22 @@ export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensServi
     });
   });
 
+
   apiRouter.get('/ready', async (_req, res) => {
     try {
       const syncDetails = await lensService.getSyncDetails();
       const peerCount = lensService.getPeerCount();
+      
+      // Log details for debugging
+      console.log('Sync status check:', {
+        synced: syncDetails.synced,
+        peerCount,
+        stores: syncDetails.stores.map(s => ({
+          name: s.name,
+          replicating: s.replicating,
+          count: s.count
+        }))
+      });
       
       res.status(syncDetails.synced ? 200 : 503).json({
         ready: syncDetails.synced,
