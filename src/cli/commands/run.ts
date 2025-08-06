@@ -81,6 +81,12 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     // Increase EventEmitter max listeners to prevent warnings in P2P networks
     process.setMaxListeners(100);
 
+    // Node.js memory optimizations for P2P nodes
+    if (argv.light) {
+      // Light nodes can be more aggressive with memory limits
+      process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --max-old-space-size=256`;
+    }
+
 
     const shutdown = async (signal: string) => {
       if (isShuttingDown) return;
@@ -209,7 +215,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             enabled: true,
             autoRelay: {
               enabled: true,
-              maxListeners: 2
+              maxListeners: 4
             }
           }
         };
@@ -263,22 +269,35 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           })),
         });
 
-        // After startup, track bootstrapper connections and retry disconnected ones
-        const bootstrapperRetryAttempts = new Map<string, number>();
+        // After startup, track stable peer connections and retry disconnected ones
+        const stablePeerRetryAttempts = new Map<string, number>();
+        const stablePeerAddresses = new Map<string, string>(); // peerId -> multiaddr
         
-        // Monitor peer disconnections and retry bootstrappers
+        // Track connected stable peers (non-light nodes)
+        peerbit.libp2p.addEventListener('peer:connect', (evt) => {
+          const peerId = evt.detail.toString();
+          const connection = peerbit!.libp2p.getConnections(evt.detail)[0];
+          if (connection) {
+            const remoteAddr = connection.remoteAddr.toString();
+            stablePeerAddresses.set(peerId, remoteAddr);
+            logger.debug('Stable peer connected', { peerId: peerId.slice(0, 12) + '...', addr: remoteAddr });
+          }
+        });
+        
+        // Monitor peer disconnections and retry stable peers
         peerbit.libp2p.addEventListener('peer:disconnect', (evt) => {
           const peerId = evt.detail.toString();
+          const peerAddr = stablePeerAddresses.get(peerId);
           
-          // Check if this was a bootstrapper
+          // Check if this was a bootstrapper (priority reconnection)
           const bootstrapperAddr = bootstrappersList.find(addr => addr.includes(peerId));
           if (bootstrapperAddr) {
-            const attempts = bootstrapperRetryAttempts.get(bootstrapperAddr) || 0;
-            const backoffMs = Math.pow(4, attempts) * 1000; // 4x exponential backoff starting at 1s
+            const attempts = stablePeerRetryAttempts.get(bootstrapperAddr) || 0;
+            const backoffMs = Math.min(Math.pow(2, attempts) * 1000, 30000); // 2x backoff, max 30s
             
             logger.info('Bootstrapper disconnected, scheduling reconnect', {
               bootstrapper: bootstrapperAddr,
-              peerId,
+              peerId: peerId.slice(0, 12) + '...',
               attempts: attempts + 1,
               retryIn: `${backoffMs/1000}s`
             });
@@ -286,18 +305,103 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             setTimeout(async () => {
               try {
                 await peerbit!.dial(bootstrapperAddr);
-                bootstrapperRetryAttempts.set(bootstrapperAddr, 0); // Reset on success
-                logger.info('Successfully reconnected to bootstrapper', { bootstrapper: bootstrapperAddr });
+                stablePeerRetryAttempts.set(bootstrapperAddr, 0); // Reset on success
+                logger.info('Successfully reconnected to bootstrapper', { 
+                  bootstrapper: bootstrapperAddr.slice(0, 50) + '...' 
+                });
               } catch (error) {
-                bootstrapperRetryAttempts.set(bootstrapperAddr, attempts + 1);
+                stablePeerRetryAttempts.set(bootstrapperAddr, attempts + 1);
                 logger.warn('Failed to reconnect to bootstrapper', {
-                  bootstrapper: bootstrapperAddr,
+                  bootstrapper: bootstrapperAddr.slice(0, 50) + '...',
                   error: error instanceof Error ? error.message : 'Unknown error',
                   attempts: attempts + 1
                 });
               }
             }, backoffMs);
+          } 
+          // For non-bootstrapper stable peers, attempt reconnection with longer backoff
+          // Note: Only works during the same session - CDN nodes are ephemeral
+          else if (peerAddr && !argv.light) { // Only stable nodes try to reconnect to other stable peers
+            const attempts = stablePeerRetryAttempts.get(peerId) || 0;
+            const backoffMs = Math.min(Math.pow(3, attempts) * 5000, 120000); // 3x backoff, max 2min
+            
+            logger.debug('Stable peer disconnected, scheduling reconnect', {
+              peerId: peerId.slice(0, 12) + '...',
+              attempts: attempts + 1,
+              retryIn: `${backoffMs/1000}s`
+            });
+            
+            setTimeout(async () => {
+              try {
+                // Try to reconnect using the stored address
+                await peerbit!.dial(peerAddr);
+                stablePeerRetryAttempts.set(peerId, 0); // Reset on success
+                logger.debug('Successfully reconnected to stable peer', { 
+                  peerId: peerId.slice(0, 12) + '...' 
+                });
+              } catch (error) {
+                stablePeerRetryAttempts.set(peerId, attempts + 1);
+                // Only log warnings after multiple failures to avoid spam
+                if (attempts >= 2) {
+                  logger.warn('Failed to reconnect to stable peer', {
+                    peerId: peerId.slice(0, 12) + '...',
+                    attempts: attempts + 1,
+                    maxAttempts: 5
+                  });
+                }
+                
+                // Stop trying after 5 attempts (could be permanently offline)
+                if (attempts >= 4) {
+                  stablePeerAddresses.delete(peerId);
+                  stablePeerRetryAttempts.delete(peerId);
+                }
+              }
+            }, backoffMs);
           }
+          
+          // Clean up peer address tracking
+          if (peerAddr) {
+            // Don't immediately delete - we might want to reconnect
+            setTimeout(() => {
+              if (!peerbit!.libp2p.getConnections(evt.detail).length) {
+                stablePeerAddresses.delete(peerId);
+              }
+            }, 300000); // Clean up after 5 minutes if not reconnected
+          }
+        });
+        
+        // Periodic connection health check (every 2 minutes)
+        const healthCheckInterval = setInterval(() => {
+          const connections = peerbit!.libp2p.getConnections();
+          const stablePeerCount = connections.length;
+          
+          // For stable nodes, aim to maintain at least 3-4 connections
+          const minConnections = argv.light ? 1 : 3;
+          
+          if (stablePeerCount < minConnections) {
+            logger.warn('Low stable peer connections', {
+              current: stablePeerCount,
+              minimum: minConnections,
+              light: argv.light
+            });
+            
+            // Try to reconnect to a random bootstrapper if we're low on connections
+            if (stablePeerCount === 0 && bootstrappersList.length > 0) {
+              const randomBootstrapper = bootstrappersList[Math.floor(Math.random() * bootstrappersList.length)];
+              logger.info('No connections, attempting emergency bootstrap', { 
+                bootstrapper: randomBootstrapper.slice(0, 50) + '...' 
+              });
+              peerbit!.dial(randomBootstrapper).catch(() => {}); // Ignore errors, normal retry will handle
+            }
+          }
+        }, 120000);
+        
+        // Clean up intervals on shutdown
+        process.on('SIGINT', () => {
+          clearInterval(healthCheckInterval);
+        });
+        process.on('SIGTERM', () => {
+          clearInterval(healthCheckInterval);
         });
       }
 
@@ -365,18 +469,36 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             const featuredCount = await lensService!.siteProgram!.featuredReleases.index.getSize();
             const subscriptionCount = await lensService!.siteProgram!.subscriptions.index.getSize();
 
-            logger.info('Replication status', {
+            // Memory usage - simplified for production, detailed for dev
+            const memUsage = process.memoryUsage();
+            const basicMemory = {
+              rss: Math.round(memUsage.rss / 1024 / 1024), // Total RAM used (MB)
+              heap: Math.round(memUsage.heapUsed / 1024 / 1024), // JS heap used (MB)
+              external: Math.round(memUsage.external / 1024 / 1024), // C++ objects (MB)
+              uptime: Math.round(process.uptime() / 60) // Minutes
+            };
+
+            const logData = {
               connections: connections.length,
-              connectedPeers: connections.map(c => c.remotePeer.toString()),
-              subscriptions: subscriptions.length,
               stores: {
                 releases: releaseCount,
                 featured: featuredCount,
                 subscriptions: subscriptionCount,
               },
-              uptime: process.uptime(),
-              memoryUsage: process.memoryUsage(),
-            });
+              memory: basicMemory
+            };
+
+            // Add verbose details only in dev mode
+            if (argv.dev) {
+              (logData as any).connectedPeers = connections.map(c => c.remotePeer.toString());
+              (logData as any).subscriptions = subscriptions.length;
+              (logData as any).detailedMemory = {
+                heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+                arrayBuffers: Math.round(memUsage.arrayBuffers / 1024 / 1024)
+              };
+            }
+
+            logger.info('Replication status', logData);
           } catch (error) {
             logError('Error logging replication status', error);
           }
