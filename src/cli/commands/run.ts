@@ -17,6 +17,7 @@ import { handleUpdateTrackNamesFromID3 } from './updateTrackNames.js';
 
 
 type RunCommandArgs = {
+  replicaFactor?: number;
   relay?: boolean;
   domain?: string[];
   listenPort: number;
@@ -300,8 +301,24 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logger.info('Initializing LensService...');
       lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
-      // Configure replication based on mode
-      const replicationConfig = argv.light ? { factor: 1 } : true;
+      // Determine replication configuration
+      //   - Light mode (outbound‑only) uses dynamic replication (replicate: true)
+      //   - Full mode (default) uses full replication (factor: 1) unless overridden.
+      //   - If --replicaFactor is provided, it overrides both modes.
+      const getReplicationConfig = (argv: any) => {
+        if (typeof argv.replicaFactor === 'number' && argv.replicaFactor > 0) {
+          // Explicit factor from CLI
+          return { factor: Math.max(1, Math.floor(argv.replicaFactor)) };
+        }
+        // Light mode = dynamic replication
+        if (argv.light) {
+          return true; // dynamic replication (replicate: true)
+        }
+        // Default full mode – full replication (factor: 1)
+        return { factor: 1 };
+      };
+      const replicationConfig = getReplicationConfig(argv);
+      logger.info('Replication config', { replicationConfig });
       const siteArgs = {
         releasesArgs: { replicate: replicationConfig },
         featuredReleasesArgs: { replicate: replicationConfig },
