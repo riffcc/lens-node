@@ -78,6 +78,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     let lensService: LensService | undefined;
     let isShuttingDown = false;
 
+    // Increase EventEmitter max listeners to prevent warnings in P2P networks
+    process.setMaxListeners(100);
+
 
     const shutdown = async (signal: string) => {
       if (isShuttingDown) return;
