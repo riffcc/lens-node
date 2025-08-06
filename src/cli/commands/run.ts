@@ -128,8 +128,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     });
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      logger.error('Unhandled rejection', { reason: String(reason), promise: String(promise) });
+      // Log it but NEVER crash - the node must stay running
+      console.log('Unhandled rejection (ignoring):', String(reason));
+      // Don't exit, don't throw, just continue running
     });
 
     try {

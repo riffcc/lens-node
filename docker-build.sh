@@ -1,1 +1,1 @@
-docker build -t zorlin/lens-node:0.1.48-a6 --build-arg TAG=0.1.48-a6 .
+docker build -t zorlin/lens-node:0.1.48-a7 --build-arg TAG=0.1.48-a7 .
