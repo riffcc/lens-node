@@ -77,6 +77,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     let peerbit: Peerbit | undefined;
     let lensService: LensService | undefined;
     let isShuttingDown = false;
+    let healthCheckInterval: NodeJS.Timeout | undefined;
+    let statusInterval: NodeJS.Timeout | undefined;
 
     // Increase EventEmitter max listeners to prevent warnings in P2P networks
     process.setMaxListeners(100);
@@ -92,28 +94,35 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       if (isShuttingDown) return;
       isShuttingDown = true;
 
-      logger.info('Shutdown initiated', { signal });
+      // Stop using logger immediately to prevent Winston "write after end" errors
+      console.log(`Shutdown initiated: ${signal}`);
 
       try {
+        // Clear intervals first
+        if (healthCheckInterval) {
+          clearInterval(healthCheckInterval);
+        }
+        if (statusInterval) {
+          clearInterval(statusInterval);
+        }
+
         if (lensService) {
           await lensService.stop();
         }
         if (peerbit) {
           await peerbit.stop();
-          logger.info('Peerbit client closed succesfully')
+          console.log('Peerbit client closed successfully');
         }
-        logger.info('Cleanup finished');
+        console.log('Cleanup finished');
       } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
-        logError('Error during shutdown', error);
+        console.error('Error during shutdown:', error.message);
       } finally {
         // Close Winston transports to prevent "write after end" errors
         try {
           logger.close();
-          // Give a small delay for transports to finish closing
-          await new Promise(resolve => setTimeout(resolve, 100));
         } catch (closeError) {
-          console.error('Error closing logger:', closeError);
+          // Ignore logger closing errors during shutdown
         }
         process.exit(0);
       }
@@ -187,6 +196,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           addresses: {
             listen: [], // Empty array = don't listen on any addresses
           },
+          connectionManager: {
+            maxConnections: 100,
+          },
         };
         logger.info('Light mode enabled - client-only node with outbound connections only');
       } else {
@@ -203,6 +215,9 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
               `/ip4/${bindHost}/tcp/${listenPort}`,
               `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
             ],
+          },
+          connectionManager: {
+            maxConnections: 200,
           },
         };
       }
@@ -371,7 +386,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         });
         
         // Periodic connection health check (every 2 minutes)
-        const healthCheckInterval = setInterval(() => {
+        healthCheckInterval = setInterval(() => {
           const connections = peerbit!.libp2p.getConnections();
           const stablePeerCount = connections.length;
           
@@ -396,13 +411,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           }
         }, 120000);
         
-        // Clean up intervals on shutdown
-        process.on('SIGINT', () => {
-          clearInterval(healthCheckInterval);
-        });
-        process.on('SIGTERM', () => {
-          clearInterval(healthCheckInterval);
-        });
+        // Clean up intervals on shutdown (via existing shutdown handler)
       }
 
       // Initialize LensService
@@ -440,9 +449,43 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       logger.info('LensService configured.');
       startServer({ lensService, bindHost });
       logger.info('Lens API REST up.');
+      
+      // Get listening addresses - wait for libp2p to be ready if needed
       let listeningOn: string[] = [];
       try {
-        listeningOn = peerbit.getMultiaddrs().map(m => m.toString());
+        // For light nodes, we don't expect listening addresses
+        if (argv.light) {
+          listeningOn = [];
+        } else {
+          // Check if libp2p is already started and has addresses
+          listeningOn = peerbit.getMultiaddrs().map(m => m.toString());
+          
+          // If no addresses yet, wait for libp2p 'self:peer:update' event
+          if (listeningOn.length === 0) {
+            logger.info('Waiting for libp2p to bind to configured addresses...');
+            
+            await new Promise<void>((resolve) => {
+              const onAddressUpdate = () => {
+                if (!peerbit) {
+                  resolve();
+                  return;
+                }
+                const addrs = peerbit.getMultiaddrs().map(m => m.toString());
+                if (addrs.length > 0) {
+                  listeningOn = addrs;
+                  peerbit.libp2p.removeEventListener('self:peer:update', onAddressUpdate);
+                  resolve();
+                }
+              };
+              
+              if (peerbit) {
+                peerbit.libp2p.addEventListener('self:peer:update', onAddressUpdate);
+              } else {
+                resolve();
+              }
+            });
+          }
+        }
       } catch (error) {
         logError('Error getting multiaddrs', error);
       }
@@ -459,7 +502,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       // Start periodic sync status logging
       if (onlyReplicate) {
         logger.info('Running in replication-only mode, starting periodic status logging');
-        const statusInterval = setInterval(async () => {
+        statusInterval = setInterval(async () => {
           try {
             const connections = peerbit!.libp2p.getConnections();
             const subscriptions = await lensService!.getSubscriptions();
@@ -504,9 +547,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           }
         }, 60000); // Log every minute
 
-        // Clear interval on shutdown
-        process.on('SIGINT', () => clearInterval(statusInterval));
-        process.on('SIGTERM', () => clearInterval(statusInterval));
+        // Clear interval on shutdown (via existing shutdown handler)
       } else {
         while (!isShuttingDown) {
           try {
