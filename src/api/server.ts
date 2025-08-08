@@ -23,9 +23,9 @@ import { createStatusRouter } from './routes/status.route.js';
 // =========================================================================
 
 
-export function startServer({ lensService, bindHost = '127.0.0.1' }: { lensService: LensService; bindHost?: string }): Application {
+export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 5002 }: { lensService: LensService; bindHost?: string; apiPort?: number }): Application {
   const app = express();
-  const port = Number(process.env.PORT) || 5002;
+  const port = Number(process.env.PORT) || apiPort;
 
   // --- Middleware ---
   app.use(cors());

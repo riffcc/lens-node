@@ -1,0 +1,55 @@
+# Development Dockerfile for building from source
+FROM node:18-alpine as builder
+
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# First, build lens-sdk locally
+COPY ../lens-sdk /lens-sdk
+WORKDIR /lens-sdk
+RUN pnpm install --frozen-lockfile && pnpm build
+
+# Now build lens-node
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Link local lens-sdk
+RUN pnpm link /lens-sdk
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source code
+COPY . .
+
+# Build the project
+RUN pnpm build
+
+# Runtime stage
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install pnpm in runtime
+RUN npm install -g pnpm
+
+# Copy built files and dependencies
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+
+# Create directory for lens-node data
+RUN mkdir -p /root/.lens-node
+
+# Make binary executable
+RUN chmod +x dist/cli/bin.js
+
+# Expose default ports
+EXPOSE 9501 3000
+
+# Default command
+CMD ["node", "dist/cli/bin.js", "run"]

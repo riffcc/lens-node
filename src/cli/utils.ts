@@ -15,9 +15,12 @@ export function getDefaultDir() {
 }
 
 export async function handleDirectorySetup(directory: string, commandName: string): Promise<boolean> {
-  if (fs.existsSync(directory)) {
+  const configPath = path.join(directory, CONFIG_FILE_NAME);
+  
+  // Check if a config file already exists (indicating an existing setup)
+  if (fs.existsSync(configPath)) {
     const overwrite = await confirm({
-      message: `The node directory "${directory}" already exists. Do you want to reconfigure for ${commandName}? This action is irreversible.`,
+      message: `The node directory "${directory}" already has a configuration. Do you want to reconfigure for ${commandName}? This action is irreversible.`,
       default: false,
     });
 
@@ -31,8 +34,13 @@ export async function handleDirectorySetup(directory: string, commandName: strin
       return false; // User aborted
     }
   } else {
-    fs.mkdirSync(directory, { recursive: true });
-    console.log(`Node directory created at: ${directory}`);
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(directory)) {
+      fs.mkdirSync(directory, { recursive: true });
+      console.log(`Node directory created at: ${directory}`);
+    } else {
+      console.log(`Using existing directory at: ${directory}`);
+    }
     return true;
   }
 }

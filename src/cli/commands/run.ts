@@ -22,6 +22,7 @@ type RunCommandArgs = {
   domain?: string[];
   listenPort: number;
   bindHost?: string;
+  apiPort?: number;
   onlyReplicate?: boolean;
   dev?: boolean;
   useRelays?: boolean;
@@ -53,6 +54,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'string',
         description: 'IP address to bind to (e.g., 0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)',
         default: '127.0.0.1',
+      })
+      .option('apiPort', {
+        type: 'number',
+        description: 'Port to listen on for HTTP API (default: 5002)',
+        default: 5002,
       })
       .option('onlyReplicate', {
         type: 'boolean',
@@ -447,7 +453,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       await lensService.openSite(siteConfig.address, { siteArgs });
       logger.info('LensService configured.');
-      startServer({ lensService, bindHost });
+      startServer({ lensService, bindHost, apiPort: argv.apiPort });
       logger.info('Lens API REST up.');
       
       // Get listening addresses - wait for libp2p to be ready if needed
