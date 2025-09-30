@@ -25,4 +25,10 @@ RUN pnpm install -g \
     --allow-build=protobufjs \
     @riffcc/lens-node@${TAG}
 
+# Force rebuild native modules from source (they use prebuilts by default)
+RUN cd /root/.local/share/pnpm/global/5/.pnpm/classic-level*/node_modules/classic-level && \
+    npx node-gyp rebuild && \
+    cd /root/.local/share/pnpm/global/5/.pnpm/better-sqlite3*/node_modules/better-sqlite3 && \
+    npx node-gyp rebuild
+
 ENTRYPOINT ["lens-node"]

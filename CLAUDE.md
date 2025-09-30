@@ -18,3 +18,25 @@ The challenge is that checking sync status triggers expensive distributed index 
 3. Ensure the check completes quickly without exhausting system resources
 
 But the check MUST verify actual content replication, not just peer connectivity.
+
+## CRITICAL: Local Build vs Docker - It Works Locally
+
+**THE LOCAL BUILD WORKS RELIABLY.** When debugging Docker issues:
+
+The site `zb2rhcRzjgGXUxi8PypUJGvk42HXaXQS3VBZ2aYvgAUrDgkZ1` EXISTS and the local build connects, replicates, and runs successfully with these exact parameters:
+
+```bash
+rm -r ~/.lens-node/
+SITE_ADDRESS=zb2rhcRzjgGXUxi8PypUJGvk42HXaXQS3VBZ2aYvgAUrDgkZ1 \
+BOOTSTRAPPERS=/dns4/relay01.eu.riff.cc/tcp/443/wss/p2p/12D3KooWRcsxc5FBG4QU6MoeGmuXi5KbQyYKwZPnkemKV2GZcRvM,/dns4/relay02.us.riff.cc/tcp/443/wss/p2p/12D3KooWGie5X52rmrZ6iDgqrWv8Ecnc3YfUwsopCT6isbVWZHJR,/dns4/relay03.sg.riff.cc/tcp/443/wss/p2p/12D3KooWDDwXRyvibdj1quDsmvmEKPGH2yK2mMEGXonBKc5GPdDh \
+./dist/cli/bin.js run -d ~/.lens-node --onlyReplicate --light --useRelays --apiPort 10002 --listenPort 9001
+```
+
+Output: `LensService configured.` and the node runs successfully.
+
+If Docker fails with "Failed to load store" but local works, the issue is NOT:
+- The site doesn't exist
+- The parameters are wrong
+- Native modules (if local and Docker both use the same published package)
+
+Look for environment differences: permissions, file paths, network configuration, or Docker-specific issues.
