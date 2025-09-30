@@ -40,3 +40,21 @@ If Docker fails with "Failed to load store" but local works, the issue is NOT:
 - Native modules (if local and Docker both use the same published package)
 
 Look for environment differences: permissions, file paths, network configuration, or Docker-specific issues.
+
+## CRITICAL: Using DeepWiki for Peerbit Research
+
+**DeepWiki is NOT aware of Lens Node specific terminology or implementation details.**
+
+When querying the dao-xyz/peerbit repository via DeepWiki:
+- ❌ DO NOT use Lens-specific terms like "Lens node", "Site", "ready check", "featured releases"
+- ✅ DO use Peerbit-specific terms like "peer", "SharedLog", "replication", "relay", "DirectStream"
+- ❌ DO NOT assume DeepWiki knows about our lens-sdk wrapper or LensService
+- ✅ DO ask about core Peerbit concepts like "connectionManager", "DialerOptions", "SeekDelivery"
+
+**Example Queries:**
+- ✅ "How does Peerbit handle relay reconnection when relay connections are lost?"
+- ❌ "How does Lens handle relay reconnection?"
+- ✅ "How does SeekDelivery calculate quorum in Peerbit?"
+- ❌ "How does the ready check work with SeekDelivery?"
+
+DeepWiki provides documentation for the **upstream Peerbit library**, not our implementation that wraps it.
