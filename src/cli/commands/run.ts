@@ -268,7 +268,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
 
       if (bootstrappers) {
-        const bootstrappersList = bootstrappers.split(',').map(b => b.trim());
+        // Support both single and comma-separated bootstrapper lists
+        const bootstrappersList = bootstrappers.includes(',')
+          ? bootstrappers.split(',').map(b => b.trim())
+          : [bootstrappers];
         logger.info('Dialing bootstrappers', {
           bootstrappers: bootstrappersList,
           count: bootstrappersList.length,
@@ -284,10 +287,13 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           successful,
           failed: failed.length,
           total: dialingResult.length,
-          failures: failed.map((f, i) => ({
-            bootstrapper: bootstrappersList[i],
-            error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
-          })),
+          failures: dialingResult
+            .map((result, i) => ({ result, index: i }))
+            .filter(x => x.result.status === 'rejected')
+            .map(({ result, index }) => ({
+              bootstrapper: bootstrappersList[index],
+              error: (result as PromiseRejectedResult).reason?.message || 'Unknown error',
+            })),
         });
 
         // After startup, track stable peer connections and retry disconnected ones
