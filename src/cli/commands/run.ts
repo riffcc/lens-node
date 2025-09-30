@@ -213,8 +213,8 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           addresses: {
             announce: domain ?
               domain.flatMap(d => [
-                `/dns4/${d}/tcp/4002`,
-                `/dns4/${d}/tcp/4003/wss`,
+                `/dns4/${d}/tcp/443/wss`, // WSS on standard HTTPS port for browser connectivity
+                `/dns4/${d}/tcp/${listenPort}`, // TCP on custom port for direct P2P
               ]) :
               undefined,
             listen: [
