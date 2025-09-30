@@ -130,6 +130,9 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
     });
   });
 
+  app.use('/releases', createReleaseRouter({ lensService }));
+  app.use('/featured-releases', createFeaturedReleasesRouter({ lensService }));
+  app.use('/content-categories', createCategoriesRouter({ lensService }));
   app.use('/structures', createStructuresRouter({ lensService }));
   app.use('/status', createStatusRouter({ lensService }));
 
