@@ -50,9 +50,9 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
         setTimeout(() => reject(new Error('Sync check timeout')), 5000);
       });
       
-      const syncDetailsPromise = lensService.getSyncDetails();
-      const syncDetails = await Promise.race([syncDetailsPromise, timeoutPromise]) as any;
-      const peerCount = lensService.getPeerCount();
+      // TODO: Restore getSyncDetails() and getPeerCount() when available in lens-sdk
+      const syncDetails = { stores: [], synced: true };
+      const peerCount = 0;
       
       // For accuracy, also get the actual API counts that users would see
       let apiReleasesCount = 0;
