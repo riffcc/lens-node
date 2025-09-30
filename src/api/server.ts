@@ -121,6 +121,18 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
 
   app.use('/api/v1', apiRouter);
 
+  // --- Shortcut routes (directly serve current API version content) ---
+  app.get('/health', (_req, res) => {
+    res.status(200).json({
+      status: 'ok',
+      message: 'Lens API is running',
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.use('/structures', createStructuresRouter({ lensService }));
+  app.use('/status', createStatusRouter({ lensService }));
+
   const globalErrorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     console.error(err);
 
