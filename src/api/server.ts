@@ -49,29 +49,29 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('Sync check timeout')), 5000);
       });
-      
-      // TODO: Restore getSyncDetails() and getPeerCount() when available in lens-sdk
-      const syncDetails = { stores: [], synced: true };
-      const peerCount = 0;
-      
+
+      const syncDetailsPromise = lensService.getSyncDetails();
+      const syncDetails = await Promise.race([syncDetailsPromise, timeoutPromise]) as any;
+      const peerCount = lensService.getPeerCount();
+
       // For accuracy, also get the actual API counts that users would see
       let apiReleasesCount = 0;
       let apiFeaturedCount = 0;
       let apiCategoriesCount = 0;
-      
+
       try {
         const releases = await lensService.getReleases();
         apiReleasesCount = releases.length;
-        
+
         const featured = await lensService.getFeaturedReleases();
         apiFeaturedCount = featured.length;
-        
+
         const categories = await lensService.getContentCategories();
         apiCategoriesCount = categories.length;
       } catch (error) {
         console.warn('Could not get API counts for ready check:', error);
       }
-      
+
       // Update store counts to match what the API actually serves
       const adjustedStores = syncDetails.stores.map((store: any) => {
         if (store.name === 'releases' && apiReleasesCount > 0) {
@@ -83,7 +83,7 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
         }
         return store;
       });
-      
+
       // Log details for debugging
       console.log('Sync status check:', {
         synced: syncDetails.synced,
@@ -94,7 +94,7 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
           count: s.count
         }))
       });
-      
+
       res.status(syncDetails.synced ? 200 : 503).json({
         ready: syncDetails.synced,
         peerCount,
