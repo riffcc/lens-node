@@ -76,7 +76,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       })
       .option('light', {
         type: 'boolean',
-        description: 'Light mode for edge deployment - no P2P listening, API only',
+        description: 'Light mode: outbound connections only, no P2P listening (client-only)',
         default: false,
       }),
   handler: async (argv) => {
@@ -252,7 +252,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       peerbit = await Peerbit.create({
         directory: dir,
-        relay: argv.relay,
+        relay: argv.useRelays, // Enable circuit relay client (NAT traversal)
         libp2p: libp2pConfig,
       });
 
@@ -431,19 +431,16 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
       // Determine replication configuration
-      //   - Light mode (outbound‑only) uses dynamic replication (replicate: true)
-      //   - Full mode (default) uses full replication (factor: 1) unless overridden.
-      //   - If --replicaFactor is provided, it overrides both modes.
+      //   - Default: full replication (factor: 1) - replicates ALL content
+      //   - If --replicaFactor is provided, it overrides the default
+      //   - Note: --light only affects connectivity (outbound-only), not replication
       const getReplicationConfig = (argv: any) => {
         if (typeof argv.replicaFactor === 'number' && argv.replicaFactor > 0) {
           // Explicit factor from CLI
           return { factor: Math.max(1, Math.floor(argv.replicaFactor)) };
         }
-        // Light mode = dynamic replication
-        if (argv.light) {
-          return true; // dynamic replication (replicate: true)
-        }
-        // Default full mode – full replication (factor: 1)
+        // Default: full replication (factor: 1)
+        // Note: --light only affects connectivity (no listening), not replication strategy
         return { factor: 1 };
       };
       const replicationConfig = getReplicationConfig(argv);
