@@ -2,9 +2,6 @@ FROM node:22-trixie-slim
 
 WORKDIR /app
 
-ARG TAG
-ENV TAG=${TAG:-latest}
-
 # Enable corepack, set PNPM_HOME and ensure pnpm is available
 ENV PNPM_HOME=/root/.local/share/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -17,18 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the CLI with allowed build scripts for native modules
-RUN pnpm install -g \
-    --allow-build=@ipshipyard/node-datachannel \
-    --allow-build=better-sqlite3 \
-    --allow-build=classic-level \
-    --allow-build=protobufjs \
-    @riffcc/lens-node@${TAG}
+# Copy package files and lockfile
+COPY package.json pnpm-lock.yaml ./
 
-# Force rebuild native modules from source (they use prebuilts by default)
-RUN cd /root/.local/share/pnpm/global/5/.pnpm/classic-level*/node_modules/classic-level && \
-    npx node-gyp rebuild && \
-    cd /root/.local/share/pnpm/global/5/.pnpm/better-sqlite3*/node_modules/better-sqlite3 && \
-    npx node-gyp rebuild
+# Install dependencies locally
+RUN pnpm install --frozen-lockfile
 
-ENTRYPOINT ["lens-node"]
+# Copy source and build
+COPY . .
+RUN pnpm build
+
+ENTRYPOINT ["node", "dist/cli/bin.js"]

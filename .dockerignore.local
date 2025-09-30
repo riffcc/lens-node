@@ -1,9 +1,0 @@
-node_modules/
-.git/
-*.log
-coverage/
-.env
-.env.*
-__tests__/
-.vscode/
-.idea/
