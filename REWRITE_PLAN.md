@@ -3,6 +3,13 @@
 ## Vision
 Make lens-node the easiest decentralized database layer for the browser - **ridiculously bulletproof replication**.
 
+## Tech Stack
+**Rust Core + Node.js Bindings**
+- `lens-sdk-2`: Rust library for core functionality
+- `lens-node-2`: Rust-based node with Node.js bindings via napi-rs
+- Performance: Native Rust speed for P2P, CRDT operations
+- Safety: Rust's memory safety for bulletproof stability
+
 ## Core Problems to Solve
 1. **Replication Stability** - Current lens-node has fragile peer connections (3-peer minimum warnings)
 2. **State Synchronization** - Need bulletproof eventual consistency
@@ -64,11 +71,17 @@ Make lens-node the easiest decentralized database layer for the browser - **ridi
 
 ## Implementation Phases
 
+### Phase 0: Rust Setup (Week 0)
+- [ ] Create `lens-sdk-2` Rust workspace
+- [ ] Setup napi-rs for Node.js bindings
+- [ ] CI/CD for cross-platform compilation (Linux, macOS, Windows, WASM)
+- [ ] Basic FFI layer for TypeScript integration
+
 ### Phase 1: Foundation (Week 1)
-- [ ] Upgrade all @peerbit dependencies to latest
-- [ ] Create new replication manager architecture
-- [ ] Implement local-first IndexedDB layer
-- [ ] Write comprehensive unit tests
+- [ ] Port core replication logic to Rust
+- [ ] Implement CRDT data structures in Rust
+- [ ] Create IndexedDB bindings (wasm-bindgen)
+- [ ] Write comprehensive unit tests (Rust + integration)
 
 ### Phase 2: P2P Mesh (Week 2)
 - [ ] Multi-peer connection management
