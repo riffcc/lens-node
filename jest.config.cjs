@@ -1,0 +1,7 @@
+// jest.config.cjs – config for ESM project
+module.exports = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  testMatch: ['**/tests/**/*.test.ts'],
+  testTimeout: 300000,
+};

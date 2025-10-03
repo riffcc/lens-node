@@ -1,0 +1,74 @@
+# Full build Dockerfile that includes lens-sdk from source
+# Use the same base image throughout to ensure binary compatibility
+FROM node:22-slim as base
+
+# Install pnpm and build tools once in base
+RUN npm install -g pnpm && \
+    apt-get update && \
+    apt-get install -y python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Build lens-sdk
+FROM base as sdk-builder
+WORKDIR /lens-sdk
+
+# Copy lens-sdk files
+COPY ./lens-sdk/package.json ./lens-sdk/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY ./lens-sdk/ ./
+RUN pnpm build
+
+# Build lens-node
+FROM base as node-builder
+WORKDIR /app
+
+# Copy lens-node package files
+COPY ./lens-node/package.json ./lens-node/pnpm-lock.yaml ./
+
+# Copy built lens-sdk from previous stage
+COPY --from=sdk-builder /lens-sdk /lens-sdk
+
+# Install dependencies with local lens-sdk using file: protocol
+RUN sed -i 's|"@riffcc/lens-sdk": ".*"|"@riffcc/lens-sdk": "file:/lens-sdk"|' package.json && \
+    pnpm install --no-frozen-lockfile && \
+    pnpm rebuild
+
+# Copy lens-node source
+COPY ./lens-node/ ./
+
+# Build lens-node
+RUN pnpm build
+
+# Runtime stage - same base image!
+FROM base
+
+WORKDIR /app
+
+# Copy everything from the build stage
+COPY --from=node-builder /app/dist ./dist
+COPY --from=node-builder /app/node_modules ./node_modules
+COPY --from=node-builder /app/package.json ./package.json
+COPY --from=sdk-builder /lens-sdk /lens-sdk
+
+# Rebuild native modules in the runtime container
+RUN cd /app && pnpm rebuild
+
+# Create directory for lens-node data
+RUN mkdir -p /root/.lens-node
+
+# Make binary executable
+RUN chmod +x dist/cli/bin.js
+
+# Copy entrypoint script
+COPY ./lens-node/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose default ports
+EXPOSE 9501 3000
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Default command (will be passed to entrypoint which adds node dist/cli/bin.js)
+CMD ["run"]

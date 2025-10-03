@@ -1,0 +1,46 @@
+# Simple single-stage Dockerfile for lens-node
+FROM node:18-slim
+
+WORKDIR /app
+
+# Install pnpm and build tools
+RUN npm install -g pnpm && \
+    apt-get update && \
+    apt-get install -y python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy lens-sdk source
+COPY ./lens-sdk /lens-sdk
+WORKDIR /lens-sdk
+RUN pnpm install --frozen-lockfile && pnpm build
+
+# Copy lens-node source
+WORKDIR /app
+COPY ./lens-node/package.json ./lens-node/pnpm-lock.yaml ./
+
+# Install dependencies with local lens-sdk
+RUN sed -i 's|"@riffcc/lens-sdk": ".*"|"@riffcc/lens-sdk": "file:/lens-sdk"|' package.json && \
+    pnpm install --no-frozen-lockfile
+
+# Copy lens-node source and build
+COPY ./lens-node/ ./
+RUN pnpm build
+
+# Create directory for lens-node data
+RUN mkdir -p /root/.lens-node
+
+# Make binary executable
+RUN chmod +x dist/cli/bin.js
+
+# Copy entrypoint script
+COPY ./lens-node/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Expose default ports
+EXPOSE 9501 3000
+
+# Set entrypoint
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Default command (will be passed to entrypoint which adds node dist/cli/bin.js)
+CMD ["run"]

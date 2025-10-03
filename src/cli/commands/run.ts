@@ -1,5 +1,5 @@
 import inquirer from 'inquirer';
-import { input, select } from '@inquirer/prompts';
+import { input, select, confirm } from '@inquirer/prompts';
 import { Libp2pCreateOptions, Peerbit } from 'peerbit';
 import type { CommandModule } from 'yargs';
 import { GlobalOptions } from '../types.js';
@@ -13,14 +13,20 @@ import { startServer } from '../../api/server.js';
 import { MigrationGenerator } from '../../migrations/generator.js';
 import { MigrationRunner } from '../../migrations/runner.js';
 import { defaultSiteContentCategories } from '@riffcc/lens-sdk';
+import { handleUpdateTrackNamesFromID3 } from './updateTrackNames.js';
 
 
 type RunCommandArgs = {
+  replicaFactor?: number;
   relay?: boolean;
   domain?: string[];
   listenPort: number;
+  bindHost?: string;
+  apiPort?: number;
   onlyReplicate?: boolean;
   dev?: boolean;
+  useRelays?: boolean;
+  light?: boolean;
 };
 
 const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
@@ -44,6 +50,16 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         description: 'Port to listen on for libp2p configuration',
         default: DEFAULT_LISTEN_PORT_LIBP2P,
       })
+      .option('bindHost', {
+        type: 'string',
+        description: 'IP address to bind to (e.g., 0.0.0.0 for all interfaces, 127.0.0.1 for localhost only)',
+        default: '127.0.0.1',
+      })
+      .option('apiPort', {
+        type: 'number',
+        description: 'Port to listen on for HTTP API (default: 5002)',
+        default: 5002,
+      })
       .option('onlyReplicate', {
         type: 'boolean',
         description: 'Run the node in replicator mode',
@@ -52,31 +68,68 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         type: 'boolean',
         description: 'Enable development mode with additional menu options',
         default: false,
+      })
+      .option('useRelays', {
+        type: 'boolean',
+        description: 'Enable auto-relay to use circuit relay nodes (for NAT/firewall traversal)',
+        default: false,
+      })
+      .option('light', {
+        type: 'boolean',
+        description: 'Light mode: outbound connections only, no P2P listening (client-only)',
+        default: false,
       }),
   handler: async (argv) => {
     let peerbit: Peerbit | undefined;
     let lensService: LensService | undefined;
     let isShuttingDown = false;
+    let healthCheckInterval: NodeJS.Timeout | undefined;
+    let statusInterval: NodeJS.Timeout | undefined;
+
+    // Increase EventEmitter max listeners to prevent warnings in P2P networks
+    process.setMaxListeners(100);
+
+    // Node.js memory optimizations for P2P nodes
+    if (argv.light) {
+      // Light nodes can be more aggressive with memory limits
+      process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS || ''} --max-old-space-size=256`;
+    }
+
 
     const shutdown = async (signal: string) => {
       if (isShuttingDown) return;
       isShuttingDown = true;
 
-      logger.info('Shutdown initiated', { signal });
+      // Stop using logger immediately to prevent Winston "write after end" errors
+      console.log(`Shutdown initiated: ${signal}`);
 
       try {
+        // Clear intervals first
+        if (healthCheckInterval) {
+          clearInterval(healthCheckInterval);
+        }
+        if (statusInterval) {
+          clearInterval(statusInterval);
+        }
+
         if (lensService) {
           await lensService.stop();
         }
         if (peerbit) {
           await peerbit.stop();
-          logger.info('Peerbit client closed succesfully')
+          console.log('Peerbit client closed successfully');
         }
-        logger.info('Cleanup finished');
-      } catch (e: unknown) { // --- FIX #1: Use the improved logger here ---
+        console.log('Cleanup finished');
+      } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
-        logError('Error during shutdown', error);
+        console.error('Error during shutdown:', error.message);
       } finally {
+        // Close Winston transports to prevent "write after end" errors
+        try {
+          logger.close();
+        } catch (closeError) {
+          // Ignore logger closing errors during shutdown
+        }
         process.exit(0);
       }
     };
@@ -84,12 +137,24 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
     // Handle termination signals
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    
+    // Prevent DeliveryError from crashing the process
+    process.on('uncaughtException', (error) => {
+      if (error.name === 'DeliveryError' || error.message?.includes('DeliveryError')) {
+        // DeliveryError is expected in P2P networks, just log it
+        console.log('DeliveryError (expected in P2P):', error.message);
+        return; // Don't crash
+      } else {
+        // Log other uncaught exceptions but don't exit
+        console.error('Uncaught Exception:', error.message, error.stack);
+        // Don't call process.exit() - let it continue running
+      }
+    });
 
     process.on('unhandledRejection', (reason, promise) => {
-      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    });
-    process.on('uncaughtException', (error) => {
-      console.error('Uncaught Exception:', error);
+      // Log it but NEVER crash - the node must stay running
+      console.log('Unhandled rejection (ignoring):', String(reason));
+      // Don't exit, don't throw, just continue running
     });
 
     try {
@@ -113,30 +178,70 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
         directory: dir,
         onlyReplicate,
         siteAddress,
+        bindHost: argv.bindHost || (argv.onlyReplicate ? '0.0.0.0' : '127.0.0.1'),
+        listenPort: Number(argv['listen-port'] || argv.listenPort || DEFAULT_LISTEN_PORT_LIBP2P),
         bootstrappers: bootstrappers?.split(',').map(b => b.trim()),
         nodeVersion: process.version,
         platform: process.platform,
         pid: process.pid,
+        relay: argv.relay,
+        useRelays: argv.useRelays,
       });
 
       // Set up libp2p configuration if domains are provided
       let libp2pConfig: Libp2pCreateOptions | undefined;
-      const { domain, listenPort } = argv
-      const bindHost = onlyReplicate ? '0.0.0.0' : '127.0.0.1';
-      libp2pConfig = {
-        addresses: {
-          announce: domain ?
-            domain.flatMap(d => [
-              `/dns4/${d}/tcp/4002`,
-              `/dns4/${d}/tcp/4003/wss`,
-            ]) :
-            undefined,
-          listen: [
-            `/ip4/${bindHost}/tcp/${listenPort}`,
-            `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
-          ],
-        },
-      };
+      const { domain } = argv;
+      const listenPort = Number(argv['listen-port'] || argv.listenPort || DEFAULT_LISTEN_PORT_LIBP2P);
+      // Use bindHost from argv, or default to 0.0.0.0 for onlyReplicate mode, otherwise 127.0.0.1
+      const bindHost = argv.bindHost || (argv.onlyReplicate ? '0.0.0.0' : '127.0.0.1');
+      
+      // Configure libp2p based on mode
+      if (argv.light) {
+        // Light mode: client-only node, no listening (outbound connections only)
+        libp2pConfig = {
+          addresses: {
+            listen: [], // Empty array = don't listen on any addresses
+          },
+          connectionManager: {
+            maxConnections: 100,
+          },
+        };
+        logger.info('Light mode enabled - client-only node with outbound connections only');
+      } else {
+        // Normal mode: set up listen addresses
+        libp2pConfig = {
+          addresses: {
+            announce: domain ?
+              domain.flatMap(d => [
+                `/dns4/${d}/tcp/443/wss`, // WSS on standard HTTPS port for browser connectivity
+                `/dns4/${d}/tcp/${listenPort}`, // TCP on custom port for direct P2P
+              ]) :
+              undefined,
+            listen: [
+              `/ip4/${bindHost}/tcp/${listenPort}`,
+              `/ip4/${bindHost}/tcp/${listenPort + 1}/ws`,
+            ],
+          },
+          connectionManager: {
+            maxConnections: 200,
+          },
+        };
+      }
+
+      // Enable auto-relay for NAT/firewall traversal if requested
+      if (argv.useRelays) {
+        // Add relay configuration to libp2p services
+        (libp2pConfig as any).config = {
+          relay: {
+            enabled: true,
+            autoRelay: {
+              enabled: true,
+              maxListeners: 4
+            }
+          }
+        };
+        logger.info('Auto-relay enabled for NAT/firewall traversal');
+      }
 
       // Initialize Peerbit client
       logger.info('Initializing Peerbit client', {
@@ -147,7 +252,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
 
       peerbit = await Peerbit.create({
         directory: dir,
-        relay: argv.relay,
+        relay: argv.useRelays, // Enable circuit relay client (NAT traversal)
         libp2p: libp2pConfig,
       });
 
@@ -163,7 +268,10 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       });
 
       if (bootstrappers) {
-        const bootstrappersList = bootstrappers.split(',').map(b => b.trim());
+        // Support both single and comma-separated bootstrapper lists
+        const bootstrappersList = bootstrappers.includes(',')
+          ? bootstrappers.split(',').map(b => b.trim())
+          : [bootstrappers];
         logger.info('Dialing bootstrappers', {
           bootstrappers: bootstrappersList,
           count: bootstrappersList.length,
@@ -179,24 +287,214 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
           successful,
           failed: failed.length,
           total: dialingResult.length,
-          failures: failed.map((f, i) => ({
-            bootstrapper: bootstrappersList[i],
-            error: (f as PromiseRejectedResult).reason?.message || 'Unknown error',
-          })),
+          failures: dialingResult
+            .map((result, i) => ({ result, index: i }))
+            .filter(x => x.result.status === 'rejected')
+            .map(({ result, index }) => ({
+              bootstrapper: bootstrappersList[index],
+              error: (result as PromiseRejectedResult).reason?.message || 'Unknown error',
+            })),
         });
+
+        // After startup, track stable peer connections and retry disconnected ones
+        const stablePeerRetryAttempts = new Map<string, number>();
+        const stablePeerAddresses = new Map<string, string>(); // peerId -> multiaddr
+        
+        // Track connected stable peers (non-light nodes)
+        peerbit.libp2p.addEventListener('peer:connect', (evt) => {
+          const peerId = evt.detail.toString();
+          const connection = peerbit!.libp2p.getConnections(evt.detail)[0];
+          if (connection) {
+            const remoteAddr = connection.remoteAddr.toString();
+            stablePeerAddresses.set(peerId, remoteAddr);
+            logger.debug('Stable peer connected', { peerId: peerId.slice(0, 12) + '...', addr: remoteAddr });
+          }
+        });
+        
+        // Monitor peer disconnections and retry stable peers
+        peerbit.libp2p.addEventListener('peer:disconnect', (evt) => {
+          const peerId = evt.detail.toString();
+          const peerAddr = stablePeerAddresses.get(peerId);
+          
+          // Check if this was a bootstrapper (priority reconnection)
+          const bootstrapperAddr = bootstrappersList.find(addr => addr.includes(peerId));
+          if (bootstrapperAddr) {
+            const attempts = stablePeerRetryAttempts.get(bootstrapperAddr) || 0;
+            const backoffMs = Math.min(Math.pow(2, attempts) * 1000, 30000); // 2x backoff, max 30s
+            
+            logger.info('Bootstrapper disconnected, scheduling reconnect', {
+              bootstrapper: bootstrapperAddr,
+              peerId: peerId.slice(0, 12) + '...',
+              attempts: attempts + 1,
+              retryIn: `${backoffMs/1000}s`
+            });
+            
+            setTimeout(async () => {
+              try {
+                await peerbit!.dial(bootstrapperAddr);
+                stablePeerRetryAttempts.set(bootstrapperAddr, 0); // Reset on success
+                logger.info('Successfully reconnected to bootstrapper', { 
+                  bootstrapper: bootstrapperAddr.slice(0, 50) + '...' 
+                });
+              } catch (error) {
+                stablePeerRetryAttempts.set(bootstrapperAddr, attempts + 1);
+                logger.warn('Failed to reconnect to bootstrapper', {
+                  bootstrapper: bootstrapperAddr.slice(0, 50) + '...',
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                  attempts: attempts + 1
+                });
+              }
+            }, backoffMs);
+          } 
+          // For non-bootstrapper stable peers, attempt reconnection with longer backoff
+          // Note: Only works during the same session - CDN nodes are ephemeral
+          else if (peerAddr && !argv.light) { // Only stable nodes try to reconnect to other stable peers
+            const attempts = stablePeerRetryAttempts.get(peerId) || 0;
+            const backoffMs = Math.min(Math.pow(3, attempts) * 5000, 120000); // 3x backoff, max 2min
+            
+            logger.debug('Stable peer disconnected, scheduling reconnect', {
+              peerId: peerId.slice(0, 12) + '...',
+              attempts: attempts + 1,
+              retryIn: `${backoffMs/1000}s`
+            });
+            
+            setTimeout(async () => {
+              try {
+                // Try to reconnect using the stored address
+                await peerbit!.dial(peerAddr);
+                stablePeerRetryAttempts.set(peerId, 0); // Reset on success
+                logger.debug('Successfully reconnected to stable peer', { 
+                  peerId: peerId.slice(0, 12) + '...' 
+                });
+              } catch (error) {
+                stablePeerRetryAttempts.set(peerId, attempts + 1);
+                // Only log warnings after multiple failures to avoid spam
+                if (attempts >= 2) {
+                  logger.warn('Failed to reconnect to stable peer', {
+                    peerId: peerId.slice(0, 12) + '...',
+                    attempts: attempts + 1,
+                    maxAttempts: 5
+                  });
+                }
+                
+                // Stop trying after 5 attempts (could be permanently offline)
+                if (attempts >= 4) {
+                  stablePeerAddresses.delete(peerId);
+                  stablePeerRetryAttempts.delete(peerId);
+                }
+              }
+            }, backoffMs);
+          }
+          
+          // Clean up peer address tracking
+          if (peerAddr) {
+            // Don't immediately delete - we might want to reconnect
+            setTimeout(() => {
+              if (!peerbit!.libp2p.getConnections(evt.detail).length) {
+                stablePeerAddresses.delete(peerId);
+              }
+            }, 300000); // Clean up after 5 minutes if not reconnected
+          }
+        });
+        
+        // Periodic connection health check (every 2 minutes)
+        healthCheckInterval = setInterval(() => {
+          const connections = peerbit!.libp2p.getConnections();
+          const stablePeerCount = connections.length;
+          
+          // For stable nodes, aim to maintain at least 3-4 connections
+          const minConnections = argv.light ? 1 : 3;
+          
+          if (stablePeerCount < minConnections) {
+            logger.warn('Low stable peer connections', {
+              current: stablePeerCount,
+              minimum: minConnections,
+              light: argv.light
+            });
+            
+            // Try to reconnect to a random bootstrapper if we're low on connections
+            if (stablePeerCount === 0 && bootstrappersList.length > 0) {
+              const randomBootstrapper = bootstrappersList[Math.floor(Math.random() * bootstrappersList.length)];
+              logger.info('No connections, attempting emergency bootstrap', { 
+                bootstrapper: randomBootstrapper.slice(0, 50) + '...' 
+              });
+              peerbit!.dial(randomBootstrapper).catch(() => {}); // Ignore errors, normal retry will handle
+            }
+          }
+        }, 120000);
+        
+        // Clean up intervals on shutdown (via existing shutdown handler)
       }
 
       // Initialize LensService
       logger.info('Initializing LensService...');
       lensService = new LensService({ peerbit, debug: Boolean(process.env.DEBUG) });
 
-      await lensService.openSite(siteConfig.address);
+      // Determine replication configuration
+      //   - Default: full replication (factor: 1) - replicates ALL content
+      //   - If --replicaFactor is provided, it overrides the default
+      //   - Note: --light only affects connectivity (outbound-only), not replication
+      const getReplicationConfig = (argv: any) => {
+        if (typeof argv.replicaFactor === 'number' && argv.replicaFactor > 0) {
+          // Explicit factor from CLI
+          return { factor: Math.max(1, Math.floor(argv.replicaFactor)) };
+        }
+        // Default: full replication (factor: 1)
+        // Note: --light only affects connectivity (no listening), not replication strategy
+        return { factor: 1 };
+      };
+      const replicationConfig = getReplicationConfig(argv);
+      logger.info('Replication config', { replicationConfig });
+      const siteArgs = {
+        releasesArgs: { replicate: replicationConfig },
+        featuredReleasesArgs: { replicate: replicationConfig },
+        contentCategoriesArgs: { replicate: replicationConfig },
+        subscriptionsArgs: { replicate: replicationConfig },
+        blockedContentArgs: { replicate: replicationConfig },
+        structuresArgs: { replicate: replicationConfig },
+      };
+
+      await lensService.openSite(siteConfig.address, { siteArgs });
       logger.info('LensService configured.');
-      startServer({ lensService });
+      startServer({ lensService, bindHost, apiPort: argv.apiPort });
       logger.info('Lens API REST up.');
+      
+      // Get listening addresses - wait for libp2p to be ready if needed
       let listeningOn: string[] = [];
       try {
-        listeningOn = peerbit.getMultiaddrs().map(m => m.toString());
+        // For light nodes, we don't expect listening addresses
+        if (argv.light) {
+          listeningOn = [];
+        } else {
+          // Check if libp2p is already started and has addresses
+          listeningOn = peerbit.getMultiaddrs().map(m => m.toString());
+          
+          // If no addresses yet, wait for libp2p 'self:peer:update' event
+          if (listeningOn.length === 0) {
+            logger.info('Waiting for libp2p to bind to configured addresses...');
+            
+            await new Promise<void>((resolve) => {
+              const onAddressUpdate = () => {
+                if (!peerbit) {
+                  resolve();
+                  return;
+                }
+                const addrs = peerbit.getMultiaddrs().map(m => m.toString());
+                if (addrs.length > 0) {
+                  listeningOn = addrs;
+                  peerbit.libp2p.removeEventListener('self:peer:update', onAddressUpdate);
+                  resolve();
+                }
+              };
+              
+              if (peerbit) {
+                peerbit.libp2p.addEventListener('self:peer:update', onAddressUpdate);
+              } else {
+                resolve();
+              }
+            });
+          }
+        }
       } catch (error) {
         logError('Error getting multiaddrs', error);
       }
@@ -213,7 +511,7 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
       // Start periodic sync status logging
       if (onlyReplicate) {
         logger.info('Running in replication-only mode, starting periodic status logging');
-        const statusInterval = setInterval(async () => {
+        statusInterval = setInterval(async () => {
           try {
             const connections = peerbit!.libp2p.getConnections();
             const subscriptions = await lensService!.getSubscriptions();
@@ -223,34 +521,49 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
             const featuredCount = await lensService!.siteProgram!.featuredReleases.index.getSize();
             const subscriptionCount = await lensService!.siteProgram!.subscriptions.index.getSize();
 
-            logger.info('Replication status', {
+            // Memory usage - simplified for production, detailed for dev
+            const memUsage = process.memoryUsage();
+            const basicMemory = {
+              rss: Math.round(memUsage.rss / 1024 / 1024), // Total RAM used (MB)
+              heap: Math.round(memUsage.heapUsed / 1024 / 1024), // JS heap used (MB)
+              external: Math.round(memUsage.external / 1024 / 1024), // C++ objects (MB)
+              uptime: Math.round(process.uptime() / 60) // Minutes
+            };
+
+            const logData = {
               connections: connections.length,
-              connectedPeers: connections.map(c => c.remotePeer.toString()),
-              subscriptions: subscriptions.length,
               stores: {
                 releases: releaseCount,
                 featured: featuredCount,
                 subscriptions: subscriptionCount,
               },
-              uptime: process.uptime(),
-              memoryUsage: process.memoryUsage(),
-            });
+              memory: basicMemory
+            };
+
+            // Add verbose details only in dev mode
+            if (argv.dev) {
+              (logData as any).connectedPeers = connections.map(c => c.remotePeer.toString());
+              (logData as any).subscriptions = subscriptions.length;
+              (logData as any).detailedMemory = {
+                heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+                arrayBuffers: Math.round(memUsage.arrayBuffers / 1024 / 1024)
+              };
+            }
+
+            logger.info('Replication status', logData);
           } catch (error) {
             logError('Error logging replication status', error);
           }
         }, 60000); // Log every minute
 
-        // Clear interval on shutdown
-        process.on('SIGINT', () => clearInterval(statusInterval));
-        process.on('SIGTERM', () => clearInterval(statusInterval));
+        // Clear interval on shutdown (via existing shutdown handler)
       } else {
         while (!isShuttingDown) {
           try {
             const menuChoices = [
               { name: 'Authorise an account', value: 'authorise' },
               new inquirer.Separator(),
-              { name: 'Apply migrations', value: 'apply-migrations' },
-              { name: 'Update Content Categories', value: 'update-categories' },
+              { name: 'Maintenance', value: 'maintenance' },
               new inquirer.Separator(),
               // { name: 'Manage Subscriptions', value: 'subscriptions' },
               // new inquirer.Separator(),
@@ -294,17 +607,11 @@ const runCommand: CommandModule<{}, GlobalOptions & RunCommandArgs> = {
               case 'authorise':
                 await handleAuthorizationMenu(lensService!);
                 break;
-              case 'apply-migrations':
-                await handleApplyMigrations(lensService!, argv.dir);
-                break;
-                // case 'subscriptions':
-                //   await handleSubscriptionMenu(lensService!);
+              case 'maintenance':
+                await handleMaintenanceMenu(lensService!, argv.dir);
                 break;
               case 'generate-migration':
                 await handleGenerateMigration(lensService!, argv.dir);
-                break;
-              case 'update-categories':
-                await handleUpdateCategories(lensService!);
                 break;
               case 'db-stats':
                 await handleDatabaseStats(lensService!);
@@ -565,6 +872,48 @@ async function handleAuthorizationMenu(lensService: LensService) {
 //   }
 // }
 
+async function handleMaintenanceMenu(lensService: LensService, dir: string) {
+  try {
+    const action = await select({
+      message: 'Maintenance Options:',
+      choices: [
+        { name: 'Apply migrations', value: 'apply-migrations' },
+        { name: 'Update Content Categories', value: 'update-categories' },
+        { name: 'Update track names from ID3 tags', value: 'update-id3' },
+        new inquirer.Separator(),
+        { name: 'Export Site Data', value: 'export-data' },
+        { name: 'Import Site Data', value: 'import-data' },
+        new inquirer.Separator(),
+        { name: 'Back to Main Menu', value: 'back' },
+      ],
+    });
+
+    switch (action) {
+      case 'apply-migrations':
+        await handleApplyMigrations(lensService, dir);
+        break;
+      case 'update-categories':
+        await handleUpdateCategories(lensService);
+        break;
+      case 'update-id3':
+        await handleUpdateTrackNamesFromID3(lensService);
+        break;
+      case 'export-data':
+        await handleExportData(lensService);
+        break;
+      case 'import-data':
+        await handleImportData(lensService);
+        break;
+      case 'back':
+        return;
+    }
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes('User force closed')) {
+      logError('Error in maintenance menu', error);
+    }
+  }
+}
+
 async function handleApplyMigrations(lensService: LensService, dir: string) {
   try {
     logger.info('Checking for pending migrations...');
@@ -719,49 +1068,207 @@ async function handleDatabaseStats(lensService: LensService) {
 
 async function handleExportData(lensService: LensService) {
   try {
-    const exportType = await select({
-      message: 'What would you like to export?',
-      choices: [
-        { name: 'All Releases', value: 'releases' },
-        { name: 'Content Categories', value: 'categories' },
-        { name: 'Featured Releases', value: 'featured' },
-        { name: 'Subscriptions', value: 'subscriptions' },
-        { name: 'Everything', value: 'all' },
-      ],
-    });
-    
     const filename = await input({
       message: 'Enter filename for export:',
-      default: `lens-export-${exportType}-${Date.now()}.json`,
+      default: `lens-export-${new Date().toISOString().split('T')[0]}.json`,
     });
     
-    let exportData: any = {};
+    logger.info('Starting data export...');
     
-    if (exportType === 'releases' || exportType === 'all') {
-      const releases = await lensService.getReleases();
-      exportData.releases = releases;
-    }
+    // Export all data with categorySlug mapping
+    const categories = await lensService.getContentCategories();
+    const categoryIdToSlugMap = new Map(categories.map(cat => [cat.id, cat.categoryId]));
     
-    if (exportType === 'categories' || exportType === 'all') {
-      const categories = await lensService.getContentCategories();
-      exportData.categories = categories;
-    }
+    const releases = await lensService.getReleases();
+    // Add categorySlug to each release for better import mapping
+    const releasesWithSlug = releases.map(release => ({
+      ...release,
+      categorySlug: categoryIdToSlugMap.get(release.categoryId)
+    }));
     
-    if (exportType === 'featured' || exportType === 'all') {
-      const featured = await lensService.getFeaturedReleases();
-      exportData.featured = featured;
-    }
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      siteAddress: lensService.siteProgram?.address,
+      releases: releasesWithSlug,
+      categories: categories,
+      featuredReleases: await lensService.getFeaturedReleases(),
+      subscriptions: await lensService.getSubscriptions(),
+      artists: await lensService.getArtists(),
+    };
     
-    if (exportType === 'subscriptions' || exportType === 'all') {
-      const subscriptions = await lensService.getSubscriptions();
-      exportData.subscriptions = subscriptions;
-    }
+    // Count items
+    logger.info(`Exporting:`);
+    logger.info(`  - ${exportData.releases.length} releases`);
+    logger.info(`  - ${exportData.categories.length} categories`);
+    logger.info(`  - ${exportData.featuredReleases.length} featured releases`);
+    logger.info(`  - ${exportData.subscriptions.length} subscriptions`);
+    logger.info(`  - ${exportData.artists.length} artists`);
     
     fs.writeFileSync(filename, JSON.stringify(exportData, null, 2));
-    logger.info(`Data exported to ${filename}`);
+    logger.info(`Data exported successfully to: ${filename}`);
     
   } catch (error) {
-    logError('Error exporting data', error);
+    logError('Export failed:', error);
+  }
+}
+
+async function handleImportData(lensService: LensService) {
+  try {
+    const filename = await input({
+      message: 'Enter path to import file:',
+      validate: (value) => {
+        if (!fs.existsSync(value)) {
+          return 'File does not exist';
+        }
+        return true;
+      }
+    });
+    
+    logger.info('Starting data import...');
+    
+    // Read the export file
+    const exportData = JSON.parse(fs.readFileSync(filename, 'utf-8'));
+    
+    logger.info(`Import file contains:`);
+    logger.info(`  - ${exportData.releases?.length || 0} releases`);
+    logger.info(`  - ${exportData.categories?.length || 0} categories`);
+    logger.info(`  - ${exportData.featuredReleases?.length || 0} featured releases`);
+    logger.info(`  - ${exportData.subscriptions?.length || 0} subscriptions`);
+    logger.info(`  - ${exportData.artists?.length || 0} artists`);
+    
+    const confirmImport = await confirm({
+      message: 'Do you want to proceed with the import?',
+      default: false
+    });
+    
+    if (!confirmImport) {
+      logger.info('Import cancelled');
+      return;
+    }
+    
+    // Create a mapping of categorySlug to new category ID
+    const categorySlugToIdMap = new Map<string, string>();
+    if (exportData.categories && exportData.categories.length > 0) {
+      const importedCategories = await lensService.getContentCategories();
+      for (const category of importedCategories) {
+        categorySlugToIdMap.set(category.categoryId, category.id);
+      }
+    }
+    
+    // Import categories first (releases depend on them)
+    if (exportData.categories && exportData.categories.length > 0) {
+      logger.info('Importing categories...');
+      for (const category of exportData.categories) {
+        try {
+          await lensService.addContentCategory({
+            categoryId: category.categoryId,
+            displayName: category.displayName,
+            featured: category.featured,
+            description: category.description,
+            metadataSchema: category.metadataSchema,
+          });
+          logger.debug(`Imported category: ${category.displayName}`);
+        } catch (err) {
+          logger.warn(`Failed to import category ${category.displayName}:`, err);
+        }
+      }
+    }
+    
+    // Import artists
+    if (exportData.artists && exportData.artists.length > 0) {
+      logger.info('Importing artists...');
+      for (const artist of exportData.artists) {
+        try {
+          await lensService.addArtist({
+            name: artist.name,
+            bio: artist.bio,
+            avatarCID: artist.avatarCID,
+            bannerCID: artist.bannerCID,
+            links: artist.links,
+            metadata: artist.metadata,
+          });
+          logger.debug(`Imported artist: ${artist.name}`);
+        } catch (err) {
+          logger.warn(`Failed to import artist ${artist.name}:`, err);
+        }
+      }
+    }
+    
+    // Import releases
+    if (exportData.releases && exportData.releases.length > 0) {
+      logger.info('Importing releases...');
+      for (const release of exportData.releases) {
+        try {
+          // If the release has a categorySlug, use it to find the new category ID
+          let categoryId = release.categoryId;
+          if (release.categorySlug && categorySlugToIdMap.has(release.categorySlug)) {
+            categoryId = categorySlugToIdMap.get(release.categorySlug)!;
+            logger.debug(`Mapped category slug '${release.categorySlug}' to ID '${categoryId}'`);
+          } else if (categorySlugToIdMap.size > 0) {
+            // Try to find category by matching the old categoryId as a slug
+            const matchingCategory = Array.from(categorySlugToIdMap.entries())
+              .find(([slug, _]) => slug === release.categoryId);
+            if (matchingCategory) {
+              categoryId = matchingCategory[1];
+              logger.debug(`Found category by slug match: '${release.categoryId}' -> '${categoryId}'`);
+            } else {
+              logger.warn(`Could not find category for release '${release.name}' with categoryId '${release.categoryId}'`);
+            }
+          }
+          
+          await lensService.addRelease({
+            name: release.name,
+            categoryId: categoryId,
+            contentCID: release.contentCID,
+            thumbnailCID: release.thumbnailCID,
+            artistIds: release.artistIds,
+            metadata: release.metadata,
+          });
+          logger.debug(`Imported release: ${release.name}`);
+        } catch (err) {
+          logger.warn(`Failed to import release ${release.name}:`, err);
+        }
+      }
+    }
+    
+    // Import featured releases
+    if (exportData.featuredReleases && exportData.featuredReleases.length > 0) {
+      logger.info('Importing featured releases...');
+      for (const featured of exportData.featuredReleases) {
+        try {
+          await lensService.addFeaturedRelease({
+            releaseId: featured.releaseId,
+            startTime: featured.startTime,
+            endTime: featured.endTime,
+            promoted: featured.promoted,
+            order: featured.order,
+          });
+          logger.debug(`Imported featured release: ${featured.releaseId}`);
+        } catch (err) {
+          logger.warn(`Failed to import featured release:`, err);
+        }
+      }
+    }
+    
+    // Import subscriptions
+    if (exportData.subscriptions && exportData.subscriptions.length > 0) {
+      logger.info('Importing subscriptions...');
+      for (const subscription of exportData.subscriptions) {
+        try {
+          await lensService.addSubscription({
+            to: subscription.to,
+          });
+          logger.debug(`Imported subscription to: ${subscription.to}`);
+        } catch (err) {
+          logger.warn(`Failed to import subscription:`, err);
+        }
+      }
+    }
+    
+    logger.info('Import completed successfully!');
+    
+  } catch (error) {
+    logError('Import failed:', error);
   }
 }
 

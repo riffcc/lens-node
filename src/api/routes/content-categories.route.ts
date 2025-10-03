@@ -8,7 +8,27 @@ export const createCategoriesRouter = ({ lensService }: { lensService: LensServi
   router.get('/', async (_req, res, next) => {
     try {
       const categories = await lensService.getContentCategories();
-      res.status(200).json(categories);
+      
+      // Merge duplicate categories from different lenses
+      const categoryMap = new Map();
+      
+      for (const category of categories) {
+        const key = category.categoryId; // Use slug as key
+        if (!categoryMap.has(key)) {
+          // First occurrence - use as base and track all IDs
+          categoryMap.set(key, {
+            ...category,
+            allIds: [category.id]
+          });
+        } else {
+          // Duplicate - merge the IDs
+          const existing = categoryMap.get(key);
+          existing.allIds.push(category.id);
+        }
+      }
+      
+      // Return merged categories
+      res.status(200).json(Array.from(categoryMap.values()));
     } catch (error) {
       next(error);
     }
