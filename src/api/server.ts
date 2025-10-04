@@ -11,6 +11,7 @@ import {
   createStructuresRouter
 } from './routes/index.js';
 import { createStatusRouter } from './routes/status.route.js';
+import { createAdminRouter } from './routes/admin.route.js';
 
 // =========================================================================
 //  >>> THE FIX: Teach JSON how to serialize BigInt <<<
@@ -28,7 +29,21 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
   const port = Number(process.env.PORT) || apiPort;
 
   // --- Middleware ---
-  app.use(cors());
+  app.use(cors({
+    origin: [
+      'http://127.0.0.1:4005',
+      'http://127.0.0.1:5002',
+      'http://127.0.0.1:5175',
+      'http://127.0.0.1:5177',
+      'http://127.0.0.1:5178',
+      'http://127.0.0.1:8002'
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    preflightContinue: false,
+    optionsSuccessStatus: 204
+  }));
   app.use(express.json());
 
   // --- API Routes ---
@@ -118,6 +133,7 @@ export function startServer({ lensService, bindHost = '127.0.0.1', apiPort = 500
   apiRouter.use('/artists', createArtistsRouter({ lensService }));
   apiRouter.use('/structures', createStructuresRouter({ lensService }));
   apiRouter.use('/status', createStatusRouter({ lensService }));
+  apiRouter.use('/admin', createAdminRouter(lensService));
 
   app.use('/api/v1', apiRouter);
 
